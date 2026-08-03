@@ -17,7 +17,7 @@ Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (
 |---|---|
 | Protocol framing (0x4E text, 0xF5 events, heartbeat, mic control) | Unit-tested against the official EvenDemoApp protocol doc + community captures |
 | Claude agent layer (multi-turn, subscription-billed, optional WebSearch) | **Verified live** — real answer round-tripped through the local `claude` CLI |
-| BLE connect / display / tap paging | Written, **needs first run against real glasses** (see smoke test below) |
+| BLE connect / display / tap paging | **Blocked** — `g1 scan` finds both arms, every connection attempt times out ([investigation](docs/ble-investigation.md)) |
 | Voice input (glasses mic → STT → Claude) | Not built yet — next milestone |
 
 ## Prerequisites
@@ -31,8 +31,13 @@ uv sync
 
 ## Hardware smoke test (first run)
 
+Connecting is the open problem — if `g1 hello` hangs, go to
+[docs/ble-investigation.md](docs/ble-investigation.md) and run the ladder there
+rather than retrying.
+
 1. Phone Bluetooth off. Glasses on your head (or out of the case, awake).
 2. `uv run g1 scan` — should find `..._L_...` and `..._R_...` and save their addresses to `~/.g1bridge.json`.
+   Then `uv run g1 probe` — reports Bluetooth authorization, whether macOS is already holding an arm, whether each arm advertises as connectable, and whether it accepts a link.
 3. `uv run g1 hello` — test text should appear on the HUD. Tap the right temple for next page, left for back.
 4. `uv run g1 events` — tap the TouchBars, take the glasses on/off, and watch the parsed events. If any show as `unknown`, note the raw hex — that's protocol knowledge we can add.
 5. `uv run g1 chat` — type a question in the terminal; the answer pages onto the glasses.
