@@ -108,14 +108,52 @@ async def _scan() -> None:
         print("Found only one arm — not saving. Both arms must be discoverable.")
 
 
+async def _probe_system_view() -> None:
+    """Report what CoreBluetooth itself says before we blame the glasses."""
+    from . import macos, protocol
+    from .ble import load_config
+
+    print("\nProbe 1/3 — asking macOS about Bluetooth and the saved arms...")
+    print(
+        "  (if the probe stops here, macOS is holding a Bluetooth permission prompt\n"
+        "   for this app — approve it, or grant it in System Settings > Privacy &\n"
+        "   Security > Bluetooth, then rerun)"
+    )
+    config = load_config()
+    identifiers = [
+        config[side]["address"] for side in ("left", "right") if side in config
+    ]
+    view = await macos.inspect(identifiers, protocol.UART_SERVICE_UUID)
+    print(f"  authorization: {view.authorization}")
+    print(f"  power:         {view.power}")
+    if view.error:
+        print(f"  ! {view.error}")
+    for label, peripherals in (
+        ("held by macOS now", view.system_connected),
+        ("saved arms", view.known),
+    ):
+        if not peripherals:
+            print(f"  {label}: none")
+            continue
+        print(f"  {label}:")
+        for peripheral in peripherals:
+            print(f"    {peripheral.name}: {peripheral.state}")
+    if view.system_connected:
+        print(
+            "  ^ macOS is already holding an arm. Connecting to a freshly scanned\n"
+            "    peripheral can stall in that state — note this in your report."
+        )
+
+
 async def _probe() -> None:
     """Test each arm independently: advertising mode, connectable flag, UART."""
-    import bleak as _bleak
+    from importlib.metadata import version
 
     from .ble import GlassArm  # local import to keep module load light
 
-    print(f"g1 probe (bleak {_bleak.__version__})")
-    print("Probe 1/2 — scanning 10s for advertising arms...")
+    print(f"g1 probe (bleak {version('bleak')})")
+    await _probe_system_view()
+    print("\nProbe 2/3 — scanning 10s for advertising arms...")
     seen = await G1Glasses.scan_adv()
     for side in ("left", "right"):
         sighting = seen.get(side)
@@ -146,7 +184,7 @@ async def _probe() -> None:
         )
         return
 
-    print("Probe 2/2 — trying to connect to each arm independently (right first)...")
+    print("Probe 3/3 — trying to connect to each arm independently (right first)...")
     results: dict[str, str] = {}
     for side in ("right", "left"):
         sighting = seen.get(side)
