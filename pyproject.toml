@@ -1,0 +1,29 @@
+[project]
+name = "g1bridge"
+version = "0.1.0"
+description = "Even Realities G1 smart glasses to Claude agent bridge (BLE, Mac-side)"
+readme = "README.md"
+authors = [
+    { name = "Tim", email = "barabarin.bar@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "bleak>=3.0.2",
+    "claude-agent-sdk>=0.2.119",
+]
+
+[project.scripts]
+g1 = "g1bridge.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.10.10,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
