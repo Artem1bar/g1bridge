@@ -1,7 +1,7 @@
 """Claude agent layer — a HUD-tuned assistant over the Claude Agent SDK.
 
 The SDK drives the local `claude` CLI, so requests bill the user's existing
-Claude subscription (same mechanism as Claude Code). No API key needed.
+Claude subscription (same mechanism as Claude Code). Uses ANTHROPIC_API_KEY when set; otherwise falls back to the local Claude Code login (personal use only).
 """
 
 from __future__ import annotations
