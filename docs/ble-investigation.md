@@ -1,8 +1,58 @@
 # Why the glasses won't connect
 
-Living notes on the one thing blocking this project. Last updated 2026-08-03.
+Living notes on what was, until 2026-09-03, the one thing blocking this project.
 
-## Symptom
+## Resolved: first connection, 2026-09-03
+
+`g1 probe` connected to **both arms** (UART service found, notifications on)
+on the third run of the evening. The three runs, same Mac, same code, minutes
+apart:
+
+| Run | RSSI L / R | Connect |
+|---|---|---|
+| 1 | -85 / -90 dBm (far, or in the closed case) | timeout ×2 per arm |
+| 2 | -38 / -37 dBm (on the desk next to the Mac) | timeout ×2 per arm |
+| 3 | -62 / -60 dBm (posture changed — see below) | **connected in ~3 s per arm** |
+
+Run 2 rules out signal strength as the cause; run 3 shows the Mac-side stack
+(bleak 3.0.2, CoreBluetooth, no bonding) is perfectly capable. What changed
+between runs 2 and 3 was the physical state of the glasses, not the code. The
+working hypothesis: an arm that is not worn and not charging advertises as
+connectable but sleeps through most connection requests; worn (wear sensor) or
+in the open case (charging) it listens after every advertisement. Whoever runs
+this next: note the posture in `~/g1-probe.log`, the log doesn't capture it.
+
+Practical rule until proven otherwise: **wear the glasses, or open the case,
+then connect.** The cached addresses in `~/.g1bridge.json` from July were still
+valid, so macOS did not rotate them across this period.
+
+**Second finding, same evening: after that first connect, macOS kept the arms.**
+Both arms appeared in the menu-bar Bluetooth list, and the next `g1 hello` runs
+failed with "not advertising" on every attempt: a peripheral the system is
+holding stops advertising, so a scan can never find it again. This is not a
+fault — it is how CoreBluetooth shares one link between the system and apps —
+but it means a scan-first connect is wrong on macOS after day one. Fix (in
+`GlassArm._find_device`): ask CoreBluetooth for the arm by identifier
+(`retrievePeripheralsWithIdentifiers:`), wrap that handle as a bleak device,
+and connect through it; fall back to a scan only for arms the Mac has never
+seen. This is also how the iOS drivers reconnect, so it is the right default,
+not a workaround.
+
+**First text on the HUD, 19:21.** `g1 hello` through the remembered handle
+connected both arms and the right display rendered the greeting. The left
+display showed the firmware's "Even AI is listening" screen instead. Two
+deviations from the official protocol were in play and are now fixed as the
+default: (1) we sent to the right arm after a fixed 150 ms instead of after the
+left arm's acknowledgment (`G1Glasses.send_acked`); (2) the page carried the
+"Even AI complete" status, which belongs to the voice-reply flow, rather than
+plain "Text Show" (`HudText(ai_mode=False)` is now the default; `--ai` restores
+the old behaviour for comparison). With both fixes in place (19:26) `g1 hello` rendered on **both displays**.
+Which of the two mattered is untested; `g1 hello --ai` isolates the status
+byte if anyone cares. `g1 -v hello` logs every notification byte.
+
+Everything below is kept as the record of what was ruled out.
+
+## Symptom (historical)
 
 `g1 scan` finds both arms instantly and saves their addresses. Every attempt to
 *connect* times out: CoreBluetooth's `connectPeripheral` never calls back, four
@@ -46,7 +96,38 @@ The last experiment (probe worn vs. probe in the open case) never produced data:
 - Heartbeat interval: the community protocol notes say the G1 drops a link after
   32s of silence, so 28–30s is their interval. Ours is 8s — safely inside.
 
-## Next hardware session — the ladder
+## What changed in the picture (researched 2026-09-03)
+
+- **Bonding is probably not the blocker.** MentraOS's iOS driver connects to a
+  G1 with plain CoreBluetooth `connect(peripheral, options: nil)`, matching arms
+  by the `_L_` / `_R_` name and discovering the Nordic UART service — no bond,
+  because iOS has no API for one. Only its Android driver calls `createBond()`.
+  So Apple's stack does reach the G1 without an explicit pairing step.
+- **The field fix for "connects but GATT unreachable" is posture + exclusivity:**
+  the `even_glasses` maintainer's answer to the same symptom (issue #9, July 2026)
+  was "make sure it is in pair mode, in cover, and disconnected from other
+  devices", and the reporter confirmed it worked. Official support adds: tap the
+  left TouchBar five times to reboot an arm, and unpair/re-pair.
+- **macOS addresses are not stable.** `openg1-sdk` (the only G1 Python stack
+  still updated in 2026) notes that macOS "hands back opaque addresses that
+  change between reboots", so it only ever matches by name. Our cached
+  `~/.g1bridge.json` UUIDs date from July; `g1 probe` scans fresh, `g1 hello`
+  should too — treat any saved address as a hint, never as truth.
+- **No macOS G1 connect-timeout report exists anywhere** (bleak issues, GitHub
+  code search). We are still the first documented attempt.
+- **Even Hub stays G2-only** (support article updated 2026-08-18; SDK 0.0.14),
+  so the Mac bridge / MentraOS choice below is still the whole decision space.
+- **MentraOS moved SDKs**: `@mentra/sdk` is deprecated; the current one is
+  `@mentra/miniapp` (phone-side JS + WebView, `session.transcription`,
+  `session.display.render`, `session.auth.fetch()` to our own backend). Its
+  Android G1 driver has double-tap handling commented out as broken, so a
+  tap-driven menu on G1 via Mentra is unproven.
+
+## Next hardware session — the ladder (superseded 2026-09-03: connection works; next is `g1 hello` → HUD render)
+
+Before step one: forget the glasses in the Even app (or keep phone Bluetooth
+off), reboot each arm (tap the left TouchBar five times), put them in the open
+case.
 
 Run each step, stop when something changes, keep the output.
 

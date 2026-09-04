@@ -17,7 +17,10 @@ Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (
 |---|---|
 | Protocol framing (0x4E text, 0xF5 events, heartbeat, mic control) | Unit-tested against the official EvenDemoApp protocol doc + community captures |
 | Claude agent layer (multi-turn, subscription-billed, optional WebSearch) | **Verified live** — real answer round-tripped through the local `claude` CLI |
-| BLE connect / display / tap paging | **Blocked** — `g1 scan` finds both arms, every connection attempt times out ([investigation](docs/ble-investigation.md)) |
+| BLE connect | **Works** (2026-09-03) — both arms connect in ~3 s when the glasses are worn or in the open case; asleep on the desk they ignore connection requests ([investigation](docs/ble-investigation.md)) |
+| HUD display | **Works on both arms** (2026-09-03) — after switching to the official left-ack-then-right handshake and plain Text Show status |
+| Tap paging / gesture events | Next up — `g1 events` not yet run |
+| Agent hub (menu of Claude agents on the HUD, TouchBar navigation) | **Built** — state machine + terminal simulator, 55 unit tests; runs end-to-end with `g1 hub --sim`; not yet seen on hardware |
 | Voice input (glasses mic → STT → Claude) | Not built yet — next milestone |
 
 ## Prerequisites
@@ -31,11 +34,14 @@ uv sync
 
 ## Hardware smoke test (first run)
 
-Connecting is the open problem — if `g1 hello` hangs, go to
-[docs/ble-investigation.md](docs/ble-investigation.md) and run the ladder there
-rather than retrying.
+If a connection times out, the glasses are almost certainly dozing: put them
+on, or open the charging case, and try again. After the first successful
+connect the arms show up in the Mac's Bluetooth menu and stay attached to the
+system; that's expected, and the bridge reconnects through that handle without
+scanning. The history of both findings is in
+[docs/ble-investigation.md](docs/ble-investigation.md).
 
-1. Phone Bluetooth off. Glasses on your head (or out of the case, awake).
+1. Phone Bluetooth off. Glasses **on your head** (or in the open case).
 2. `uv run g1 scan` — should find `..._L_...` and `..._R_...` and save their addresses to `~/.g1bridge.json`.
    Then `uv run g1 probe` — reports Bluetooth authorization, whether macOS is already holding an arm, whether each arm advertises as connectable, and whether it accepts a link.
 3. `uv run g1 hello` — test text should appear on the HUD. Tap the right temple for next page, left for back.
@@ -50,6 +56,57 @@ Useful flags: `g1 -v ...` (debug logging), `g1 chat --chars 44 --lines 5` (displ
 - **`g1 clear`**: sends a community-observed exit command (`0x18`) that is *not* in the official protocol doc. If it does nothing, that's expected — double-tapping a TouchBar always exits.
 - **Page-status nibbles**: first page is sent as "Even AI displaying", taps re-send pages in "manual mode" per the official doc; if paging misbehaves, capture `g1 -v chat` logs.
 
+## The hub
+
+`g1 hub` turns the HUD into a launcher: a menu of Claude agents, each with its
+own role prompt, tool access and multi-turn memory.
+
+```
++----------------------------------------+
+|CLAUDE HUB                           2/5|
+|  Ask       quick answers, web on       |
+|> Research  digs in, cites sources      |
+|  Translate any language <-> English    |
+|  Explain   a term or idea, simply      |
++----------------------------------------+
+```
+
+| Where | Right tap | Left tap | Long-press left | Triple tap | Double tap |
+|---|---|---|---|---|---|
+| Menu | next agent | previous agent | open the agent | — | leave the hub |
+| Inside an agent | next page | previous page | new question (voice, once built) | back to the menu | leave the hub |
+
+Double tap is the G1 firmware's own "exit app" gesture, so the hub treats it the
+same way everywhere rather than fighting it. Triple tap is how the community G1
+launcher switches apps, so it is "back" here, but the firmware also uses it to
+toggle silent mode, which is unverified on hardware; typing `back` or `menu`
+(and later saying it) always works.
+
+Until voice lands, questions are typed in the terminal; the answer pages onto
+the HUD. Typing an agent's number or name in the menu opens it too.
+
+**No glasses handy?** `uv run g1 hub --sim` renders every HUD page in the
+terminal and accepts gesture words instead of taps: `r` / `l` single tap,
+`rrr` / `lll` triple tap, `rr` / `ll` double tap, `hold` long-press. Anything
+else you type is a question for the open agent. The whole hub, agents included,
+runs this way today.
+
+**Your own agents:** create `~/.g1bridge-agents.toml` (or pass `--agents`):
+
+```toml
+[[agent]]
+id = "recipes"
+name = "Recipes"                 # menu label, max 12 chars
+blurb = "what to cook tonight"   # menu hint, max 26 chars
+system_prompt = "Suggest one dish from the ingredients the wearer names."
+web = false                      # WebSearch/WebFetch allowed? default true
+# model = "claude-haiku-4-5"     # optional per-agent model
+```
+
+An entry whose `id` matches a built-in agent (`ask`, `research`, `translate`,
+`explain`, `draft`) replaces it; new ids are appended to the menu. Bad entries
+fail with a message naming the field before anything connects.
+
 ## Layout
 
 - [protocol.py](src/g1bridge/protocol.py) — pure frame builders + notification parser (the only file that knows byte values)
@@ -57,11 +114,16 @@ Useful flags: `g1 -v ...` (debug logging), `g1 chat --chars 44 --lines 5` (displ
 - [ble.py](src/g1bridge/ble.py) — dual-arm connections, heartbeat, event dispatch (bleak)
 - [hud.py](src/g1bridge/hud.py) — paged text sessions with TouchBar paging
 - [agent.py](src/g1bridge/agent.py) — Claude Agent SDK wrapper with a HUD-tuned system prompt
-- [cli.py](src/g1bridge/cli.py) — `g1 scan | hello | events | chat | clear`
+- [agents.py](src/g1bridge/agents.py) — agent registry: built-in agents + TOML overrides, validated
+- [hub.py](src/g1bridge/hub.py) — pure hub state machine (menu ↔ agent) and menu rendering
+- [session.py](src/g1bridge/session.py) — `HubSession`: display events + terminal lines → state machine → agents
+- [display.py](src/g1bridge/display.py) — the `Display` protocol both transports satisfy
+- [sim.py](src/g1bridge/sim.py) — terminal simulator: ASCII HUD frames, typed gestures
+- [cli.py](src/g1bridge/cli.py) — `g1 scan | probe | hello | events | chat | hub | clear`
 
 ## Testing
 
-`uv run pytest` — pure logic (framing, parsing, pagination) is fully unit-tested. The BLE transport and HUD session are hardware I/O and exempt from unit coverage in this prototype; they're verified on-device via `g1 events` / `g1 hello`.
+`uv run pytest` — pure logic (framing, parsing, pagination, hub state machine, agent registry) is fully unit-tested, and `HubSession` is exercised end-to-end on the simulator with a stub agent. The BLE transport is hardware I/O and exempt from unit coverage in this prototype; it's verified on-device via `g1 events` / `g1 hello`.
 
 ## Protocol references
 
@@ -70,6 +132,7 @@ Useful flags: `g1 -v ...` (debug logging), `g1 chat --chars 44 --lines 5` (displ
 
 ## Roadmap
 
-1. **Voice**: long-press the left temple → glasses mic streams LC3 audio → decode → STT → Claude → HUD (the stock Even AI flow, but with our agent).
-2. **Tools that make it useful**: calendar, reminders, home control, notes with memory.
-3. **Daily-driver platform decision**: keep the Mac bridge for hacking, then either a MentraOS app or a custom companion app (Flutter, based on the official demo) so it works away from the desk.
+1. **Hub on real glasses**: connection works as of 2026-09-03; next confirm text renders (`g1 hello`), taps arrive (`g1 events`), then the gesture map and line widths under `g1 hub`.
+2. **Voice**: long-press the left temple → glasses mic streams LC3 audio → decode → STT → the open agent → HUD (the stock Even AI flow, but with our agents). The hub already routes the long-press to a "new question" hook.
+3. **Tools that make agents useful**: calendar, reminders, home control, notes with memory — added per agent in `~/.g1bridge-agents.toml`.
+4. **Daily-driver platform decision**: keep the Mac bridge for hacking, then either a MentraOS app or a custom companion app so it works away from the desk. The hub and agent layers are transport-agnostic (`Display` protocol), so a phone-side transport slots in without rewriting them.

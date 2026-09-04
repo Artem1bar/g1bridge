@@ -14,8 +14,12 @@ determine.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 DIAGNOSTIC_QUEUE_NAME = b"g1bridge.diagnostics"
 DELEGATE_CLASS_NAME = "G1BridgeStateDelegate"
@@ -171,3 +175,55 @@ async def inspect(
         ),
         known=tuple(describe_peripheral(p, peripheral_states) for p in known),
     )
+
+
+@dataclass(frozen=True)
+class KnownDevice:
+    """A bleak device handle built from CoreBluetooth's memory of a peripheral."""
+
+    device: Any  # bleak.backends.device.BLEDevice
+    state: str  # "connected" when macOS itself is holding the link
+
+
+async def known_device(
+    identifier: str, timeout: float = STATE_TIMEOUT_S
+) -> KnownDevice | None:
+    """Reach a peripheral macOS already knows, without scanning for it.
+
+    After the first successful connect, macOS keeps the arms attached at the
+    system level (they appear in the menu-bar Bluetooth list). A connected
+    peripheral stops advertising, so scanning never finds it again, but asking
+    CoreBluetooth for it by identifier and connecting through that handle
+    succeeds at once, sharing the system's link. Returns None off macOS, for a
+    malformed identifier, or when the system has never seen the peripheral.
+    """
+    try:
+        import CoreBluetooth as cb
+        from bleak.backends.corebluetooth.CentralManagerDelegate import (
+            CentralManagerDelegate,
+        )
+        from bleak.backends.device import BLEDevice
+        from bleak.exc import BleakError
+        from Foundation import NSUUID
+    except ImportError as exc:  # not macOS, or pyobjc missing
+        logger.debug("known-device lookup unavailable: %s", exc)
+        return None
+
+    uuid = NSUUID.alloc().initWithUUIDString_(identifier)
+    if uuid is None:
+        return None
+    manager = CentralManagerDelegate()
+    try:
+        await asyncio.wait_for(manager.wait_until_ready(), timeout)
+    except (BleakError, TimeoutError, asyncio.TimeoutError) as exc:
+        logger.debug("CoreBluetooth not ready for handle lookup: %r", exc)
+        return None
+    peripherals = manager.central_manager.retrievePeripheralsWithIdentifiers_([uuid])
+    if not peripherals:
+        return None
+    peripheral = peripherals[0]
+    snapshot = describe_peripheral(peripheral, _peripheral_state_names(cb))
+    device = BLEDevice(
+        peripheral.identifier().UUIDString(), peripheral.name(), (peripheral, manager)
+    )
+    return KnownDevice(device=device, state=snapshot.state)

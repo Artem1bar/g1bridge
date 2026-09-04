@@ -13,8 +13,8 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
-from . import protocol
-from .protocol import G1Event, ScreenStatus, parse_notification
+from . import macos, protocol
+from .protocol import EventKind, G1Event, ScreenStatus, parse_notification
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,24 @@ FIND_TIMEOUT_S = 8.0
 CONNECT_TIMEOUT_S = 20.0
 CONNECT_ATTEMPTS = 4
 RETRY_PAUSE_S = 2.0
+# Official rule: send to the right arm only after the left acknowledges. If the
+# ack never comes we still send, so a mute left arm cannot blank the right one.
+ACK_TIMEOUT_S = 1.0
+
+# Below this the arms hear our connect request only by luck. Real numbers seen:
+# -66 dBm about a metre away in the open; -85/-90 dBm from the closed case.
+WEAK_RSSI_DBM = -78
+
+
+def signal_hint(rssi: int | None) -> str | None:
+    """A one-line warning when the arm is too far away to connect reliably."""
+    if rssi is None or rssi > WEAK_RSSI_DBM:
+        return None
+    return (
+        f"signal is weak ({rssi} dBm): bring the glasses within 30 cm of the Mac, "
+        "out of the closed case, and tap a TouchBar before connecting"
+    )
+
 
 WAKE_HINT = (
     "Wake the glasses: put them on (or tap a TouchBar), or open and close the "
@@ -116,11 +134,7 @@ class GlassArm:
             attempts,
             FIND_TIMEOUT_S + CONNECT_TIMEOUT_S,
         )
-        device = await BleakScanner.find_device_by_address(
-            self.address, timeout=FIND_TIMEOUT_S
-        )
-        if device is None:
-            raise RuntimeError("not advertising — probably asleep")
+        device = await self._find_device()
         client = BleakClient(
             device,
             disconnected_callback=self._handle_disconnect,
@@ -144,6 +158,24 @@ class GlassArm:
         self._tx = tx
         logger.info("connected %s (%s)", self.name, self.address)
 
+    async def _find_device(self):
+        """The Mac's remembered handle first (works while macOS holds the arm and
+        it is not advertising), then a scan for arms the system has never seen."""
+        known = await macos.known_device(self.address)
+        if known is not None:
+            logger.info("%s: using macOS's own handle (%s)", self.name, known.state)
+            return known.device
+        device = await BleakScanner.find_device_by_address(
+            self.address, timeout=FIND_TIMEOUT_S
+        )
+        if device is None:
+            raise RuntimeError(
+                "not advertising: either connected to another device (the phone's "
+                "Even app grabs a woken arm within seconds — turn phone Bluetooth "
+                "off) or fully asleep"
+            )
+        return device
+
     async def disconnect(self) -> None:
         if self._client is not None and self._client.is_connected:
             await self._client.disconnect()
@@ -156,6 +188,7 @@ class GlassArm:
 
     def _handle_notify(self, _characteristic, data: bytearray) -> None:
         event = parse_notification(self.side, bytes(data))
+        logger.debug("%s <- %s (%s)", self.name, bytes(data).hex(), event.kind.value)
         logger.debug("%s notify: %s %s", self.side, event.kind.value, event.raw.hex())
         if self._on_event is not None:
             self._on_event(event)
@@ -178,6 +211,7 @@ class G1Glasses:
         self.right = GlassArm("right", right_address, right_name, self._dispatch)
         self.events: asyncio.Queue[G1Event] = asyncio.Queue()
         self._listeners: list[Callable[[G1Event], None]] = []
+        self._waiters: tuple[tuple[EventKind, str, asyncio.Future[G1Event]], ...] = ()
         self._heartbeat_task: asyncio.Task | None = None
         self._seq = 0
 
@@ -279,8 +313,37 @@ class G1Glasses:
 
     def _dispatch(self, event: G1Event) -> None:
         self.events.put_nowait(event)
+        for kind, side, future in self._waiters:
+            if kind is event.kind and side == event.side and not future.done():
+                future.set_result(event)
+        self._waiters = tuple(w for w in self._waiters if not w[2].done())
         for listener in self._listeners:
             listener(event)
+
+    def expect(self, kind: EventKind, side: str) -> asyncio.Future[G1Event]:
+        """A future resolved by the next event of `kind` from `side`."""
+        future: asyncio.Future[G1Event] = asyncio.get_running_loop().create_future()
+        self._waiters = (*self._waiters, (kind, side, future))
+        return future
+
+    async def send_acked(self, frame: bytes, timeout: float = ACK_TIMEOUT_S) -> bool:
+        """Left first; right after the left's ack (official protocol rule).
+
+        Returns whether the left arm acknowledged in time.
+        """
+        ack = self.expect(EventKind.TEXT_ACK, "left")
+        await self.left.write(frame)
+        try:
+            await asyncio.wait_for(ack, timeout)
+            acked = True
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning(
+                "left arm did not acknowledge within %.1fs; sending to the right anyway",
+                timeout,
+            )
+            acked = False
+        await self.right.write(frame)
+        return acked
 
     async def send_both(self, frame: bytes, gap_s: float = INTER_ARM_GAP_S) -> None:
         """Send to the left arm first, then the right after a short gap."""
@@ -300,7 +363,7 @@ class G1Glasses:
         frame = protocol.text_page(
             text, page=page, total_pages=total_pages, status=status, seq=self._seq
         )
-        await self.send_both(frame, gap_s=0.15)
+        await self.send_acked(frame)
 
     async def exit_to_dashboard(self) -> None:
         """Experimental — see protocol.exit_to_dashboard()."""

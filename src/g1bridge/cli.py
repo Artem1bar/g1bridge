@@ -5,11 +5,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
+import threading
+from pathlib import Path
+from typing import AsyncIterator
 
 from .agent import GlassesAgent
-from .ble import G1Glasses, save_config
+from .agents import AGENTS_PATH, load_agents
+from .ble import G1Glasses, save_config, signal_hint
+from .display import Display
 from .hud import HudText
 from .paginate import DEFAULT_CHARS_PER_LINE, DEFAULT_LINES_PER_PAGE
+from .session import HubSession
+from .sim import SimGlasses
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +40,33 @@ def main() -> None:
     hello.add_argument("text", nargs="?", default=HELLO_TEXT)
 
     chat = sub.add_parser("chat", help="terminal chat; answers page onto the glasses")
-    chat.add_argument("--model", default=None, help="model override for the agent")
-    chat.add_argument(
-        "--no-web", action="store_true", help="disable WebSearch/WebFetch"
+
+    hub = sub.add_parser(
+        "hub", help="agent hub on the HUD: pick a Claude agent with the TouchBars"
+    )
+    hub.add_argument(
+        "--sim", action="store_true", help="no glasses: render the HUD in the terminal"
+    )
+    hub.add_argument(
+        "--agents",
+        type=Path,
+        default=AGENTS_PATH,
+        help=f"agent definitions, TOML (default: {AGENTS_PATH})",
     )
 
-    for command in (hello, chat):
+    for command in (chat, hub):
+        command.add_argument(
+            "--model", default=None, help="model override for the agents"
+        )
+        command.add_argument(
+            "--no-web", action="store_true", help="disable WebSearch/WebFetch"
+        )
+    for command in (hello, chat, hub):
+        command.add_argument(
+            "--ai",
+            action="store_true",
+            help="send pages with Even AI statuses instead of plain Text Show",
+        )
         command.add_argument(
             "--chars", type=int, default=DEFAULT_CHARS_PER_LINE, help="chars per line"
         )
@@ -46,6 +75,8 @@ def main() -> None:
         )
 
     args = parser.parse_args()
+    # Diagnostics get piped through `tee`; keep prints in order with the log lines.
+    sys.stdout.reconfigure(line_buffering=True)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -55,7 +86,7 @@ def main() -> None:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
         print()
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         if args.verbose:
             raise
         raise SystemExit(f"error: {exc}") from exc
@@ -68,6 +99,12 @@ async def _run(args: argparse.Namespace) -> None:
     if args.command == "probe":
         await _probe()
         return
+    if args.command == "hub":
+        agents = load_agents(args.agents)  # fail on bad TOML before the slow connect
+        if args.sim:
+            sim = SimGlasses(max_chars=args.chars, lines_per_page=args.lines)
+            await _hub(sim, agents, args)
+            return
 
     print("Connecting to the glasses (can take ~20s per arm if they were dozing)...")
     glasses = await G1Glasses.from_config()
@@ -84,6 +121,8 @@ async def _run(args: argparse.Namespace) -> None:
             )
         elif args.command == "chat":
             await _chat(glasses, args)
+        elif args.command == "hub":
+            await _hub(glasses, agents, args)
     finally:
         await glasses.disconnect()
 
@@ -171,6 +210,8 @@ async def _probe() -> None:
         print(f"  {side:>5}: advertising, {mode}, rssi={sighting.rssi}dBm")
         if sighting.manufacturer_hex:
             print(f"         mfg-data: {sighting.manufacturer_hex}")
+        if (hint := signal_hint(sighting.rssi)) is not None:
+            print(f"         ! {hint}")
     if not seen:
         print("Neither arm is advertising. Wake the glasses and rerun.")
         return
@@ -214,7 +255,9 @@ async def _probe() -> None:
 
 
 async def _hello(glasses: G1Glasses, args: argparse.Namespace) -> None:
-    hud = HudText(glasses, max_chars=args.chars, lines_per_page=args.lines)
+    hud = HudText(
+        glasses, max_chars=args.chars, lines_per_page=args.lines, ai_mode=args.ai
+    )
     pages = await hud.show(args.text)
     print(f"Displayed {pages} page(s).", end=" ")
     if pages > 1:
@@ -238,7 +281,9 @@ async def _events(glasses: G1Glasses) -> None:
 
 
 async def _chat(glasses: G1Glasses, args: argparse.Namespace) -> None:
-    hud = HudText(glasses, max_chars=args.chars, lines_per_page=args.lines)
+    hud = HudText(
+        glasses, max_chars=args.chars, lines_per_page=args.lines, ai_mode=args.ai
+    )
     print("Chat ready — answers page onto the glasses. Ctrl+D or /quit to exit.")
     async with GlassesAgent(model=args.model, web_search=not args.no_web) as agent:
         loop = asyncio.get_running_loop()
@@ -261,3 +306,46 @@ async def _chat(glasses: G1Glasses, args: argparse.Namespace) -> None:
                 print(
                     f"({pages} pages on the HUD — tap right temple for next, left for back)"
                 )
+
+
+async def _hub(display: Display, agents, args: argparse.Namespace) -> None:
+    where = "simulated HUD below" if args.sim else "the glasses"
+    print(f"Hub with {len(agents)} agents on {where}. Ctrl+D or /quit to leave.")
+    if args.agents.exists():
+        print(f"(agents merged from {args.agents})")
+
+    def factory(spec):
+        return GlassesAgent.for_spec(spec, model=args.model, web_search=not args.no_web)
+
+    session = HubSession(
+        display,
+        agents,
+        agent_factory=factory,
+        max_chars=args.chars,
+        lines_per_page=args.lines,
+        sim_gestures=args.sim,
+        ai_mode=args.ai,
+    )
+    await session.run(stdin_lines())
+
+
+async def stdin_lines(prompt: str = "you> ") -> AsyncIterator[str]:
+    """Terminal lines as an async stream, read on a daemon thread so a hub exit
+    triggered from the glasses does not wait for one more Enter."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def reader() -> None:
+        try:
+            while True:
+                try:
+                    line = input(prompt)
+                except EOFError:
+                    return
+                loop.call_soon_threadsafe(queue.put_nowait, line)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    threading.Thread(target=reader, name="stdin-reader", daemon=True).start()
+    while (line := await queue.get()) is not None:
+        yield line

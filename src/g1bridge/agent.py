@@ -14,6 +14,8 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
+from .agents import AgentSpec
+
 HUD_SYSTEM_PROMPT = """\
 You are a voice-style assistant whose answers appear on the tiny monochrome
 heads-up display of Even Realities G1 smart glasses. The display fits 5 short
@@ -27,20 +29,45 @@ Rules:
 """
 
 
+def hub_system_prompt(spec: AgentSpec) -> str:
+    return (
+        f"{HUD_SYSTEM_PROMPT}\n"
+        f'You are the "{spec.name}" agent in the wearer\'s hub. Your role:\n'
+        f"{spec.system_prompt.strip()}\n"
+    )
+
+
 class GlassesAgent:
     """A multi-turn Claude session tuned for the G1 display."""
 
-    def __init__(self, *, model: str | None = None, web_search: bool = True):
+    def __init__(
+        self,
+        *,
+        system_prompt: str = HUD_SYSTEM_PROMPT,
+        model: str | None = None,
+        web_search: bool = True,
+    ):
         tools = ["WebSearch", "WebFetch"] if web_search else []
         self._client = ClaudeSDKClient(
             ClaudeAgentOptions(
-                system_prompt=HUD_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 tools=tools,
                 allowed_tools=list(tools),
                 # Deny anything not allow-listed instead of blocking on a prompt.
                 permission_mode="dontAsk",
                 model=model,
             )
+        )
+
+    @classmethod
+    def for_spec(
+        cls, spec: AgentSpec, *, model: str | None = None, web_search: bool = True
+    ) -> "GlassesAgent":
+        """A hub agent: the HUD rules plus the spec's own role prompt."""
+        return cls(
+            system_prompt=hub_system_prompt(spec),
+            model=spec.model or model,
+            web_search=web_search and spec.web,
         )
 
     async def __aenter__(self) -> "GlassesAgent":

@@ -64,3 +64,23 @@ def test_system_view_defaults_are_empty_not_none():
     assert view.system_connected == ()
     assert view.known == ()
     assert view.error is None
+
+
+def test_signal_hint_threshold():
+    from g1bridge.ble import WEAK_RSSI_DBM, signal_hint
+
+    assert signal_hint(None) is None
+    assert signal_hint(-66) is None
+    assert signal_hint(WEAK_RSSI_DBM + 1) is None
+    hint = signal_hint(-90)
+    assert hint is not None and "-90 dBm" in hint and "30 cm" in hint
+
+
+def test_known_device_rejects_malformed_identifier_without_touching_bluetooth():
+    import asyncio
+
+    from g1bridge.macos import known_device
+
+    # A bad UUID string must come back None before any CBCentralManager exists
+    # (creating one would raise the OS permission prompt in a headless run).
+    assert asyncio.run(known_device("not-a-uuid")) is None
