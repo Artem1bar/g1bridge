@@ -13,11 +13,19 @@ from typing import AsyncIterator
 
 from .agent import GlassesAgent
 from .agents import AGENTS_PATH, load_agents
-from .ble import G1Glasses, save_config, signal_hint
+from .ble import G1Glasses, load_config, save_config, signal_hint
 from .display import Display
 from .hud import HudText
 from .micstream import MicStats, append_payloads
 from .paginate import DEFAULT_CHARS_PER_LINE, DEFAULT_LINES_PER_PAGE
+from .providers import (
+    calendar_provider,
+    central_hub_provider,
+    eventkit_events,
+    merge_all,
+    refresh_loop,
+    weather_provider,
+)
 from .protocol import EventKind, G1Event
 from .session import HubSession
 from .sim import SimGlasses
@@ -86,6 +94,12 @@ def main() -> None:
         type=Path,
         default=None,
         help="save every voice capture as <dir>/<HHMMSS>.lc3 for offline analysis",
+    )
+    hub.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="draw the Pip-Boy home screen when you look up (over the glasses' own "
+        "dashboard); it disappears when you look back down",
     )
     hub.add_argument(
         "--stt",
@@ -428,14 +442,41 @@ async def _hub(display: Display, agents, args: argparse.Namespace) -> None:
         rest=not args.home,
         mic_cmd=args.mic_cmd,
         record_dir=args.record_dir,
+        dashboard=args.dashboard,
     )
+    feeds: asyncio.Task | None = None
+    if args.dashboard or args.home:
+        feeds = asyncio.create_task(
+            refresh_loop(
+                merge_all(home_providers(load_config())),
+                lambda: session._home,
+                session.update_home,
+            )
+        )
     try:
         await session.run(stdin_lines())
     finally:
-        if keep_warm is not None:
-            keep_warm.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await keep_warm
+        for task in (keep_warm, feeds):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+
+def home_providers(config: dict) -> list:
+    """Feeds for the home screen, from what the config and this Mac offer.
+
+    ~/.g1bridge.json may carry:
+      "home": {"lat": 30.41, "lon": -91.18}   -> weather (Open-Meteo, no key)
+      "hub_url": "http://127.0.0.1:3100"      -> central.hub (default shown)
+    Calendar comes from macOS EventKit and asks for permission once.
+    """
+    providers = [central_hub_provider(config.get("hub_url", "http://127.0.0.1:3100"))]
+    home = config.get("home") or {}
+    if "lat" in home and "lon" in home:
+        providers.append(weather_provider(float(home["lat"]), float(home["lon"])))
+    providers.append(calendar_provider(eventkit_events))
+    return providers
 
 
 def _transcribe_file(args: argparse.Namespace) -> None:

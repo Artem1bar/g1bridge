@@ -72,9 +72,28 @@ Metal shaders on launch and macOS only caches the result for a few minutes.
 Leave the hub running instead of restarting it; a dropped arm reconnects on
 its own, so the glasses can nap in the case and pick up where they left off.
 
-`--home` shows our own clock page and agent list instead (below); it is kept
-for experiments, because on hardware the firmware keeps every TouchBar gesture
-to itself while app content is on screen, so nothing but voice works there.
+**The Pip-Boy.** `--dashboard` draws our own home screen when you look up
+(the moment the glasses would show their stock dashboard) and lets it go when
+you look back down, so hold-to-talk keeps working at rest. Fallout styling for
+a green monochrome lens: uppercase labels, bar gauges, one readout per row.
+
+```
++----------------------------------------+
+|CLAUDE-TEC             THU 03 SEP  23:22|
+|BATT L[##....]33%  R[##....]37%         |
+|NEXT  10:30 CMST 2064 (in 11h07)        |
+|DUE Fri DQ 1 - Stearns an~  OPS 1 FAILED|
+|[HOLD L] ASK   [TAP] 5 APPS   [2x] EXIT |
++----------------------------------------+
+```
+
+Rows come from: the glasses' own battery reports; your `central.hub` service
+on `127.0.0.1:3100` (next class, coursework due and overdue, next deadline,
+never-called leads, failed runs in 24 h; read-only endpoints only); macOS
+Calendar (asks once); and Open-Meteo weather if `~/.g1bridge.json` has
+`"home": {"lat": ..., "lon": ...}`. Feeds refresh every five minutes and any
+that is down keeps its last value. `--home` shows the same page as a
+permanent screen for experiments (gestures are dead while it is up).
 
 ```
 +----------------------------------------+      +----------------------------------------+

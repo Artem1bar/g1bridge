@@ -71,7 +71,7 @@ def run_script(
 def test_home_menu_select_ask_answer_back_exit():
     sim, said = run_script(["r", "r", "hold", "what time is it", "back", "ll"])
     pages = sim.pages_shown
-    assert pages[0].startswith("19:27") and "Claude Hub" in pages[0]  # home
+    assert pages[0].startswith("CLAUDE-TEC") and "23:14" not in pages[0]  # home
     assert pages[1].startswith("CLAUDE HUB") and "> Ask" in pages[1]  # tap -> list
     assert pages[2].startswith("CLAUDE HUB") and "> Research" in pages[2]
     assert pages[3].startswith("Research: deep dives")  # opened, asks for typing
@@ -125,7 +125,7 @@ def test_back_word_returns_to_menu_then_pick_another():
     assert StubAgent.instances[1].asked == ["yo"]
     menus = [p for p in sim.pages_shown if p.startswith("CLAUDE HUB")]
     assert len(menus) == 1  # only after "back" (start is the home screen)
-    assert "Claude Hub" in sim.pages_shown[-1]  # "home" from inside an agent
+    assert sim.pages_shown[-1].startswith("CLAUDE-TEC")  # "home" from inside an agent
 
 
 def test_hold_on_home_talks_to_default_agent():
@@ -309,7 +309,7 @@ def test_handler_exception_is_logged_and_the_hub_keeps_serving():
     )
     asyncio.run(session.run(lines_from(["2", "home"])))
     assert any("failed" in line for line in said)
-    assert "Claude Hub" in sim.pages_shown[-1]
+    assert sim.pages_shown[-1].startswith("CLAUDE-TEC")
 
 
 # ---- rest flow: the default on the glasses ----------------------------------
@@ -478,3 +478,82 @@ def test_previews_are_throttled():
     previews = [p for p in sim.pages_shown if p.startswith("Paris")]
     assert previews[-1] == "Paris is the capital of France."
     assert len(previews) <= 2  # at most one preview plus the final page
+
+
+def test_home_flow_shows_the_pipboy_page():
+    sim, said = run_script(["r"])  # home flow: any tap opens the list
+    assert sim.pages_shown[0].startswith("CLAUDE-TEC")
+    assert "BATT L[??????]--%" in sim.pages_shown[0]
+
+
+def test_look_up_dashboard_in_rest_flow(monkeypatch):
+    from g1bridge.protocol import EventKind
+    from g1bridge.sim import GESTURES
+
+    monkeypatch.setitem(GESTURES, "up", (EventKind.DASHBOARD_OPEN, "left"))
+    monkeypatch.setitem(GESTURES, "down", (EventKind.DASHBOARD_CLOSE, "left"))
+    monkeypatch.setitem(GESTURES, "batt", (EventKind.BATTERY, "right"))
+    StubAgent.instances = []
+    sim = SimGlasses(out=lambda _: None)
+    session = HubSession(
+        sim,
+        AGENTS,
+        agent_factory=StubAgent,
+        say=lambda _: None,
+        sim_gestures=True,
+        rest=True,
+        dashboard=True,
+        now=lambda: datetime(2026, 9, 3, 23, 14),
+    )
+    asyncio.run(session.run(lines_from(["down", "up", "down"])))
+    assert len(sim.pages_shown) == 1  # only the look-up draws; the look-down does not
+    assert sim.pages_shown[0].startswith("CLAUDE-TEC")
+
+
+def test_battery_events_feed_the_home_screen():
+    from g1bridge.protocol import EventKind, G1Event
+
+    StubAgent.instances = []
+    sim = SimGlasses(out=lambda _: None)
+    session = HubSession(
+        sim,
+        AGENTS,
+        agent_factory=StubAgent,
+        say=lambda _: None,
+        sim_gestures=True,
+        rest=True,
+        dashboard=True,
+    )
+
+    async def script():
+        sim.inject(G1Event(EventKind.BATTERY, "left", b"", payload=b"\x21"))
+        sim.inject(G1Event(EventKind.BATTERY, "right", b"", payload=b"\x25"))
+        sim.inject(G1Event(EventKind.DASHBOARD_OPEN, "left", b""))
+        await asyncio.sleep(0)
+        yield "/quit"
+
+    asyncio.run(session.run(script()))
+    assert "BATT L[##....]33%  R[##....]37%" in sim.pages_shown[0]
+
+
+def test_dashboard_off_ignores_look_up():
+    from g1bridge.protocol import EventKind, G1Event
+
+    StubAgent.instances = []
+    sim = SimGlasses(out=lambda _: None)
+    session = HubSession(
+        sim,
+        AGENTS,
+        agent_factory=StubAgent,
+        say=lambda _: None,
+        sim_gestures=True,
+        rest=True,
+    )
+
+    async def script():
+        sim.inject(G1Event(EventKind.DASHBOARD_OPEN, "left", b""))
+        await asyncio.sleep(0)
+        yield "/quit"
+
+    asyncio.run(session.run(script()))
+    assert sim.pages_shown == []

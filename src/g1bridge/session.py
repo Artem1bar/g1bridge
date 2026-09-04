@@ -25,13 +25,13 @@ from .hub import (
     find_agent,
     go_home,
     parse_voice,
-    render_home,
     render_menu,
     select,
     step,
 )
 from .hud import HudText
 from .paginate import DEFAULT_CHARS_PER_LINE, DEFAULT_LINES_PER_PAGE
+from .pipboy import HomeData, render_pipboy
 from .protocol import EventKind, G1Event, ScreenStatus
 from .sim import GESTURE_HELP, parse_gesture
 from .voice import PACKET_SECONDS, QUIET_RMS, Capture, Transcriber, packet_rms
@@ -128,6 +128,8 @@ class HubSession:
         tail_max_s: float = TAIL_MAX_S,
         record_dir: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        dashboard: bool = False,
+        home_data: HomeData | None = None,
     ):
         self._display = display
         mode = Mode.REST if rest else Mode.HOME
@@ -140,6 +142,11 @@ class HubSession:
         self._tail_max_s = tail_max_s
         self._record_dir = record_dir
         self._monotonic = clock
+        # Look-up dashboard: when the wearer raises their head the firmware opens
+        # its own dashboard and tells us; with `dashboard` on we draw ours instead.
+        self._dashboard = dashboard
+        self._home = home_data or HomeData()
+        self._dashboard_up = False
         self._closing = False  # release seen; finishing once the wearer is quiet
         self._quiet_packets = 0
         self._finish_token = 0  # stale backstop timers must not end a new capture
@@ -210,7 +217,9 @@ class HubSession:
         """Redraw the home screen on every minute boundary while it is showing."""
         while True:
             await asyncio.sleep(60 - self._now().second)
-            if self._state.mode is Mode.HOME:
+            if self._state.mode is Mode.HOME or (
+                self._dashboard_up and self._state.mode is Mode.REST
+            ):
                 await self._show_home()
 
     async def _pump(self, lines: AsyncIterable[str]) -> None:
@@ -230,6 +239,17 @@ class HubSession:
             self._say(f"  [{event.side:>5}] {event.kind.value}{detail}")
         if event.kind is EventKind.MIC_DATA:
             return await self._on_mic_packet(event)
+        if event.kind is EventKind.BATTERY and event.payload:
+            self._home = self._home.with_battery(event.side, event.payload[0])
+            return True
+        if self._dashboard and self._state.mode is Mode.REST:
+            if event.kind is EventKind.DASHBOARD_OPEN:
+                self._dashboard_up = True
+                await self._show_home()
+                return True
+            if event.kind is EventKind.DASHBOARD_CLOSE:
+                self._dashboard_up = False
+                return True
         if event.kind is EventKind.AI_STOP:
             if self._tail_max_s <= 0:
                 return await self._finish_listening()
@@ -406,13 +426,18 @@ class HubSession:
     # -- screens ----------------------------------------------------------
 
     async def _show_home(self) -> None:
-        home = render_home(
-            self._state,
+        home = render_pipboy(
+            self._home,
             self._now(),
             lines_per_page=self._lines_per_page,
             max_chars=self._max_chars,
+            agents=len(self._state.agents),
         )
         await self._display.send_text_page(home, status=self._screen_status)
+
+    def update_home(self, data: HomeData) -> None:
+        """Data providers (calendar, weather, central.hub) push refreshed rows here."""
+        self._home = data
 
     async def _show_menu(self) -> None:
         menu = render_menu(
