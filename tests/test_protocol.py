@@ -106,3 +106,55 @@ def test_head_gestures_and_battery_are_distinct_from_dashboard_events():
     )
     battery = parse_notification("left", bytes([0xF5, 0x0A, 0x21]) + bytes(18))
     assert battery.kind is EventKind.BATTERY and battery.payload == b"\x21"
+
+
+# --- bitmap upload (official doc + EvenDemoApp bmp_update_manager.dart) ---
+
+
+def test_bmp_packets_carry_the_storage_address_only_on_the_first():
+    image = bytes(range(256)) * 2  # 512 bytes -> 194 + 194 + 124
+    packets = protocol.bmp_packets(image)
+    assert len(packets) == 3
+    assert packets[0][:6] == bytes([0x15, 0x00, 0x00, 0x1C, 0x00, 0x00])
+    assert packets[0][6:] == image[:194]
+    assert packets[1][:2] == bytes([0x15, 0x01]) and packets[1][2:] == image[194:388]
+    assert packets[2][:2] == bytes([0x15, 0x02]) and packets[2][2:] == image[388:]
+
+
+def test_bmp_packets_seq_wraps_after_255():
+    packets = protocol.bmp_packets(bytes(194 * 300))
+    assert len(packets) == 300
+    assert packets[255][1] == 0xFF and packets[256][1] == 0x00
+
+
+def test_bmp_packets_reject_an_empty_image():
+    with pytest.raises(ValueError):
+        protocol.bmp_packets(b"")
+
+
+def test_bmp_end_is_the_fixed_finish_command():
+    assert protocol.bmp_end() == bytes([0x20, 0x0D, 0x0E])
+
+
+def test_bmp_crc_covers_the_address_and_is_big_endian():
+    import zlib
+
+    image = b"reticle"
+    expected = zlib.crc32(bytes([0x00, 0x1C, 0x00, 0x00]) + image)
+    frame = protocol.bmp_crc(image)
+    assert frame[0] == 0x16
+    assert frame[1:] == expected.to_bytes(4, "big")
+
+
+def test_parse_bmp_finish_and_crc_replies():
+    assert parse_notification("left", bytes([0x20, 0xC9])).kind is EventKind.BMP_END_OK
+    assert (
+        parse_notification("left", bytes([0x20, 0xCA])).kind is EventKind.BMP_END_FAIL
+    )
+    ok = bytes([0x16, 0x12, 0x34, 0x56, 0x78, 0xC9])
+    assert parse_notification("right", ok).kind is EventKind.BMP_CRC_OK
+    bad = bytes([0x16, 0x12, 0x34, 0x56, 0x78, 0xCA])
+    assert parse_notification("right", bad).kind is EventKind.BMP_CRC_FAIL
+    assert (
+        parse_notification("right", bytes([0x16, 0xC9])).kind is EventKind.BMP_CRC_FAIL
+    )

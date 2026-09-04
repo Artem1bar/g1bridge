@@ -8,12 +8,14 @@ import contextlib
 import logging
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
 from .agent import GlassesAgent
 from .agents import AGENTS_PATH, load_agents
 from .ble import G1Glasses, load_config, save_config, signal_hint
+from .cockpit import render_cockpit
 from .display import Display
 from .hud import HudText
 from .micstream import MicStats, append_payloads
@@ -60,6 +62,32 @@ def main() -> None:
     hello.add_argument("text", nargs="?", default=HELLO_TEXT)
 
     chat = sub.add_parser("chat", help="terminal chat; answers page onto the glasses")
+
+    cockpit = sub.add_parser(
+        "cockpit",
+        help="always-on reticle drawn as a bitmap: corner marks, a centre cross, "
+        "the time top-left, the charge bottom-right",
+    )
+    cockpit.add_argument(
+        "--sim", action="store_true", help="no glasses: print the bitmap as ASCII"
+    )
+    cockpit.add_argument(
+        "--once", action="store_true", help="send it once and leave it on the lens"
+    )
+    cockpit.add_argument(
+        "--battery",
+        type=int,
+        default=None,
+        metavar="PERCENT",
+        help="show this charge instead of the arms' own reports",
+    )
+    cockpit.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        metavar="FILE.bmp",
+        help="also write the bitmap file here (Preview opens it)",
+    )
 
     hub = sub.add_parser(
         "hub", help="agent hub on the HUD: pick a Claude agent with the TouchBars"
@@ -174,6 +202,9 @@ async def _run(args: argparse.Namespace) -> None:
     if args.command == "transcribe":
         _transcribe_file(args)
         return
+    if args.command == "cockpit" and args.sim:
+        await _cockpit(SimGlasses(), args)
+        return
     if args.command == "hub":
         agents = load_agents(args.agents)  # fail on bad TOML before the slow connect
         if args.sim:
@@ -196,6 +227,8 @@ async def _run(args: argparse.Namespace) -> None:
             )
         elif args.command == "chat":
             await _chat(glasses, args)
+        elif args.command == "cockpit":
+            await _cockpit(glasses, args)
         elif args.command == "hub":
             await _hub(glasses, agents, args)
     finally:
@@ -339,6 +372,56 @@ async def _hello(glasses: G1Glasses, args: argparse.Namespace) -> None:
         print("Tap the right temple for next page, left for back.", end=" ")
     print("Ctrl+C to exit.")
     await asyncio.Event().wait()
+
+
+async def _cockpit(display: Display, args: argparse.Namespace) -> None:
+    """Draw the reticle now, then again whenever the minute or the charge changes."""
+    where = "the simulated HUD" if args.sim else "both lenses"
+    print(f"Cockpit reticle on {where}.", end=" ")
+    if args.sim or args.once:
+        print()
+    else:
+        print("Redrawn each minute; Ctrl+C clears the lens and leaves.")
+    reports: dict[str, int] = {}
+    changed = asyncio.Event()
+
+    def on_event(event: G1Event) -> None:
+        if event.kind is EventKind.BATTERY and event.payload:
+            reports[event.side] = event.payload[0]
+            changed.set()
+
+    display.add_listener(on_event)
+    shown: tuple[str, int | None] | None = None
+    try:
+        while True:
+            now = datetime.now()
+            if args.battery is not None:
+                percent: int | None = args.battery
+            else:
+                # One number on the lens: the arm that will die first.
+                percent = min(reports.values()) if reports else None
+            key = (now.strftime("%H:%M"), percent)
+            if key != shown:
+                image = render_cockpit(now, percent).to_bmp()
+                if args.save is not None:
+                    args.save.write_bytes(image)
+                ok = await display.send_bitmap(image)
+                charge = "--" if percent is None else str(percent)
+                verdict = "shown" if ok else "REFUSED by an arm (run with -v)"
+                print(f"[{key[0]}] battery {charge}%: {verdict}")
+                shown = key
+            if args.sim or args.once:
+                if args.save is not None:
+                    print(f"Bitmap saved to {args.save}")
+                return
+            changed.clear()
+            with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
+                await asyncio.wait_for(changed.wait(), 60.5 - now.second)
+    except asyncio.CancelledError:
+        # Ctrl+C: hand the lens back to the firmware before leaving.
+        with contextlib.suppress(Exception):
+            await display.exit_to_dashboard()
+        raise
 
 
 async def _events(glasses: G1Glasses, record: Path | None) -> None:

@@ -9,6 +9,7 @@ Byte-level facts verified against:
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
@@ -19,6 +20,11 @@ UART_RX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  # glasses -> host (n
 
 # A text page is sent as a single 0x4E package; ATT long writes handle fragmentation.
 MAX_TEXT_PAYLOAD = 480
+# A bitmap is the whole 1-bit BMP file, streamed in 194-byte pieces to a fixed
+# storage address on the glasses (official doc + EvenDemoApp bmp_update_manager).
+BMP_CHUNK = 194
+BMP_ADDRESS = bytes([0x00, 0x1C, 0x00, 0x00])
+BMP_OK = 0xC9
 
 
 class Cmd(IntEnum):
@@ -27,7 +33,8 @@ class Cmd(IntEnum):
     MIC = 0x0E
     BMP_PACKET = 0x15
     BMP_CRC = 0x16
-    EXIT = 0x18  # community-observed exit-to-dashboard; not in the official doc
+    BMP_END = 0x20  # "all packets sent", fixed payload 0x0D 0x0E
+    EXIT = 0x18  # "exit all func" in the official demo app (Proto.exit); not in its doc
     HEARTBEAT = 0x25
     NOTIFICATION = 0x4B
     TEXT = 0x4E
@@ -67,6 +74,10 @@ class EventKind(Enum):
     MIC_DATA = "mic_data"
     HEARTBEAT_ACK = "heartbeat_ack"
     TEXT_ACK = "text_ack"
+    BMP_END_OK = "bmp_end_ok"
+    BMP_END_FAIL = "bmp_end_fail"
+    BMP_CRC_OK = "bmp_crc_ok"
+    BMP_CRC_FAIL = "bmp_crc_fail"
     UNKNOWN = "unknown"
 
 
@@ -138,8 +149,31 @@ def mic_control(enable: bool) -> bytes:
 
 
 def exit_to_dashboard() -> bytes:
-    """Experimental: community-observed exit command; confirm on hardware."""
+    """0x18: what the demo app's Exit button sends after a bitmap (reply 0xC9)."""
     return bytes([Cmd.EXIT])
+
+
+def bmp_packets(image: bytes) -> tuple[bytes, ...]:
+    """The 0x15 frames for one BMP file: seq byte, then the storage address on
+    the first frame only, then up to 194 bytes of the file."""
+    if not image:
+        raise ValueError("empty bitmap")
+    frames = []
+    for seq, start in enumerate(range(0, len(image), BMP_CHUNK)):
+        head = bytes([Cmd.BMP_PACKET, seq & 0xFF]) + (BMP_ADDRESS if seq == 0 else b"")
+        frames.append(head + image[start : start + BMP_CHUNK])
+    return tuple(frames)
+
+
+def bmp_end() -> bytes:
+    """0x20 0x0D 0x0E: every packet has been sent; the glasses reply 0xC9."""
+    return bytes([Cmd.BMP_END, 0x0D, 0x0E])
+
+
+def bmp_crc(image: bytes) -> bytes:
+    """0x16 + CRC-32 (the plain zlib polynomial, big-endian) over address + file."""
+    crc = zlib.crc32(BMP_ADDRESS + image) & 0xFFFFFFFF
+    return bytes([Cmd.BMP_CRC]) + crc.to_bytes(4, "big")
 
 
 def parse_notification(side: str, data: bytes) -> G1Event:
@@ -162,4 +196,15 @@ def parse_notification(side: str, data: bytes) -> G1Event:
         return G1Event(EventKind.HEARTBEAT_ACK, side, raw)
     if cmd == Cmd.TEXT:
         return G1Event(EventKind.TEXT_ACK, side, raw)
+    if cmd == Cmd.BMP_END:
+        ok = len(raw) >= 2 and raw[1] == BMP_OK
+        return G1Event(
+            EventKind.BMP_END_OK if ok else EventKind.BMP_END_FAIL, side, raw
+        )
+    if cmd == Cmd.BMP_CRC:
+        # The demo reads the verdict from the sixth byte of the reply.
+        ok = len(raw) >= 6 and raw[5] == BMP_OK
+        return G1Event(
+            EventKind.BMP_CRC_OK if ok else EventKind.BMP_CRC_FAIL, side, raw
+        )
     return G1Event(EventKind.UNKNOWN, side, raw)

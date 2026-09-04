@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from .bitmap import Canvas
 from .paginate import DEFAULT_CHARS_PER_LINE, DEFAULT_LINES_PER_PAGE
 from .protocol import EventKind, G1Event, ScreenStatus
 
@@ -81,6 +82,7 @@ class SimGlasses:
         self.lines_per_page = lines_per_page
         self._listeners: list[Callable[[G1Event], None]] = []
         self.pages_shown: list[str] = []
+        self.bitmaps_sent: list[bytes] = []
         self.dashboard_calls = 0
         self.mic_calls: list[bool] = []
 
@@ -102,6 +104,12 @@ class SimGlasses:
                 lines_per_page=self.lines_per_page,
             )
         )
+
+    async def send_bitmap(self, image: bytes) -> bool:
+        """A coarse ASCII picture of the bitmap, one character per 8 x 8 block."""
+        self.bitmaps_sent.append(image)
+        self._out(Canvas.from_bmp(image).preview())
+        return True
 
     def add_listener(self, listener: Callable[[G1Event], None]) -> None:
         self._listeners.append(listener)

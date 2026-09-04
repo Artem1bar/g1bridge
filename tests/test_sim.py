@@ -49,3 +49,14 @@ def test_sim_glasses_records_pages_and_dispatches_events():
 def test_mic_word_is_a_fake_audio_packet():
     event = parse_gesture("mic")
     assert event.kind is EventKind.MIC_DATA and len(event.payload) == 200
+
+
+def test_sim_send_bitmap_keeps_the_image_and_prints_a_preview():
+    from g1bridge.bitmap import Canvas
+
+    out: list[str] = []
+    sim = SimGlasses(out=out.append)
+    image = Canvas.blank().rect(0, 0, 8, 8).to_bmp()
+    ok = asyncio.run(sim.send_bitmap(image))
+    assert ok is True and sim.bitmaps_sent == [image]
+    assert any(line.startswith("#") for line in out[-1].split("\n"))

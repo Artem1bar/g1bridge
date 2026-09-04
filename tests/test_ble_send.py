@@ -179,3 +179,58 @@ def test_set_mic_survives_a_down_right_arm():
     record: list[str] = []
     glasses = make_one_armed(record, down="right")
     assert asyncio.run(glasses.set_mic(False, timeout=0.05)) is False
+
+
+# --- bitmap upload: packets, finish handshake, CRC, per arm ---
+
+
+def make_bitmap_glasses(frames: dict[str, list[bytes]], *, ack: bool):
+    glasses = G1Glasses("L", "R", "left", "right")
+
+    def writer(side: str):
+        async def write(frame: bytes) -> None:
+            frames[side].append(frame)
+            if not ack:
+                return
+            if frame[0] == 0x20:
+                glasses._dispatch(G1Event(EventKind.BMP_END_OK, side, b"\x20\xc9"))
+            elif frame[0] == 0x16:
+                glasses._dispatch(
+                    G1Event(EventKind.BMP_CRC_OK, side, b"\x16\x00\x00\x00\x00\xc9")
+                )
+
+        return write
+
+    glasses.left.write = writer("left")  # type: ignore[method-assign]
+    glasses.right.write = writer("right")  # type: ignore[method-assign]
+    return glasses
+
+
+def test_send_bitmap_streams_packets_then_finish_then_crc_to_both_arms():
+    frames: dict[str, list[bytes]] = {"left": [], "right": []}
+    glasses = make_bitmap_glasses(frames, ack=True)
+    image = bytes(range(256)) * 4  # 1024 bytes -> 6 packets
+    ok = asyncio.run(glasses.send_bitmap(image, packet_gap_s=0))
+    assert ok is True
+    for side in ("left", "right"):
+        sent = frames[side]
+        assert [f[0] for f in sent] == [0x15] * 6 + [0x20, 0x16]
+        assert sent[0][2:6] == bytes([0x00, 0x1C, 0x00, 0x00])
+        assert [f[1] for f in sent[:6]] == [0, 1, 2, 3, 4, 5]
+        assert b"".join([sent[0][6:], *(f[2:] for f in sent[1:6])]) == image
+        assert sent[6] == bytes([0x20, 0x0D, 0x0E])
+        assert sent[7][0] == 0x16 and len(sent[7]) == 5
+
+
+def test_send_bitmap_gives_up_when_the_finish_is_never_acknowledged():
+    frames: dict[str, list[bytes]] = {"left": [], "right": []}
+    glasses = make_bitmap_glasses(frames, ack=False)
+    ok = asyncio.run(
+        glasses.send_bitmap(
+            bytes(300), packet_gap_s=0, ack_timeout=0.01, end_attempts=2
+        )
+    )
+    assert ok is False
+    # Two finish attempts, no CRC without the finish ack.
+    assert [f[0] for f in frames["left"]] == [0x15, 0x15, 0x20, 0x20]
+    assert all(f[0] != 0x16 for f in frames["left"])

@@ -33,6 +33,11 @@ RETRY_PAUSE_S = 2.0
 ACK_TIMEOUT_S = 1.0
 MIC_ATTEMPTS = 2
 MIC_RETRY_PAUSE_S = 0.5
+# Bitmap upload pacing and handshakes, as in the official demo app: a short
+# pause between packets, a 3 s wait for the finish reply, ten tries.
+BMP_PACKET_GAP_S = 0.005
+BMP_ACK_TIMEOUT_S = 3.0
+BMP_END_ATTEMPTS = 10
 # An arm that drops (glasses dozing, put in the case, out of range) is retried
 # forever with a growing pause, so a hub session outlives a nap.
 RECONNECT_PAUSES_S = (2.0, 5.0, 10.0, 20.0, 30.0)
@@ -490,6 +495,85 @@ class G1Glasses:
             text, page=page, total_pages=total_pages, status=status, seq=self._seq
         )
         await self.send_acked(frame)
+
+    async def send_bitmap(
+        self,
+        image: bytes,
+        *,
+        packet_gap_s: float = BMP_PACKET_GAP_S,
+        ack_timeout: float = BMP_ACK_TIMEOUT_S,
+        end_attempts: int = BMP_END_ATTEMPTS,
+    ) -> bool:
+        """Upload a 1-bit BMP file to both lenses; True when both took it.
+
+        Each arm gets the whole file on its own (the doc allows both at once):
+        the 0x15 packets, then the finish command until it is acknowledged,
+        then the CRC. A refused CRC or a mute arm makes this False, logged.
+        """
+        packets = protocol.bmp_packets(image)
+        crc = protocol.bmp_crc(image)
+        results = await asyncio.gather(
+            *(
+                self._upload_bitmap(
+                    arm, packets, crc, packet_gap_s, ack_timeout, end_attempts
+                )
+                for arm in (self.left, self.right)
+            )
+        )
+        return all(results)
+
+    async def _upload_bitmap(
+        self,
+        arm: GlassArm,
+        packets: tuple[bytes, ...],
+        crc: bytes,
+        packet_gap_s: float,
+        ack_timeout: float,
+        end_attempts: int,
+    ) -> bool:
+        try:
+            for packet in packets:
+                await arm.write(packet)
+                if packet_gap_s:
+                    await asyncio.sleep(packet_gap_s)
+            for attempt in range(1, end_attempts + 1):
+                reply = self.expect(
+                    {EventKind.BMP_END_OK, EventKind.BMP_END_FAIL}, arm.side
+                )
+                await arm.write(protocol.bmp_end())
+                try:
+                    event = await asyncio.wait_for(reply, ack_timeout)
+                except (TimeoutError, asyncio.TimeoutError):
+                    logger.warning(
+                        "%s: no reply to the bitmap finish (try %d/%d)",
+                        arm.name,
+                        attempt,
+                        end_attempts,
+                    )
+                    await asyncio.sleep(min(1.0, ack_timeout))
+                    continue
+                if event.kind is EventKind.BMP_END_OK:
+                    break
+                logger.warning("%s refused the bitmap: %s", arm.name, event.raw.hex())
+                return False
+            else:
+                return False
+            reply = self.expect(
+                {EventKind.BMP_CRC_OK, EventKind.BMP_CRC_FAIL}, arm.side
+            )
+            await arm.write(crc)
+            try:
+                event = await asyncio.wait_for(reply, ack_timeout)
+            except (TimeoutError, asyncio.TimeoutError):
+                logger.warning("%s: no reply to the bitmap CRC", arm.name)
+                return False
+        except (RuntimeError, BleakError, OSError) as exc:  # arm down or write failed
+            logger.warning("%s: bitmap upload failed: %s", arm.name, exc)
+            return False
+        if event.kind is not EventKind.BMP_CRC_OK:
+            logger.warning("%s: bitmap CRC rejected: %s", arm.name, event.raw.hex())
+            return False
+        return True
 
     async def exit_to_dashboard(self) -> None:
         """Experimental — see protocol.exit_to_dashboard()."""
