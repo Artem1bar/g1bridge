@@ -2,7 +2,7 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
-![Simulated HUD: home dashboard, agent menu, and the Ask agent, rendered by g1 hub --sim](docs/hud-sim.png)
+![Simulated HUD: home dashboard, agent menu and the Ask agent from g1 hub --sim, and the cockpit reticle bitmap from g1 cockpit --sim](docs/hud-sim.png)
 
 Talk to a Claude agent through your **Even Realities G1** smart glasses — no phone app in the loop.
 
@@ -26,8 +26,9 @@ macOS with [uv](https://docs.astral.sh/uv/) (it fetches Python 3.12 if needed).
 ```bash
 git clone https://github.com/Artem1bar/g1bridge.git && cd g1bridge
 uv sync
-uv run pytest            # 145 unit tests, no hardware
+uv run pytest            # 172 unit tests, no hardware
 uv run g1 hub --sim      # the whole hub on a simulated HUD in your terminal
+uv run g1 cockpit --sim  # the reticle bitmap, printed as ASCII
 uv run g1 --help
 ```
 
@@ -52,6 +53,8 @@ for the developer, not a supported way to run this for anyone else.
 | Agent hub (menu of Claude agents on the HUD, TouchBar navigation) | **Built** — state machine + terminal simulator, 55 unit tests; runs end-to-end with `g1 hub --sim`; not yet seen on hardware |
 | Voice input (glasses mic → LC3 decode → whisper.cpp → Claude → HUD) | **Works end to end on the glasses** (2026-09-03 22:47): hold the left temple, "What is the capital of France?" → "Paris." on the HUD; 5.4 s capture, 0.8 s transcription, offline, no key |
 | Streaming answers, auto-reconnect | Built (simulator-verified): the first page shows while Claude is still writing; a dropped arm is retried with a growing pause so the hub outlives a nap in the case |
+| Bitmaps on the lens (1-bit 576×136 upload: `0x15` packets, finish handshake, `0x16` CRC) | **Built** from the official demo app's sequence, unit-tested; not yet seen on hardware |
+| Cockpit reticle (`g1 cockpit`): corner marks, centre cross, clock, charge | **Built** + simulator; first hardware run pending |
 
 ## Hardware prerequisites
 
@@ -79,7 +82,7 @@ Useful flags: `g1 -v ...` (debug logging), `g1 chat --chars 44 --lines 5` (displ
 ### Things to confirm on hardware (expected rough edges)
 
 - **Line width**: default is 40 chars/line for the proportional 21px font — if lines wrap short or overflow, tune `--chars`.
-- **`g1 clear`**: sends a community-observed exit command (`0x18`) that is *not* in the official protocol doc. If it does nothing, that's expected — double-tapping a TouchBar always exits.
+- **`g1 clear`**: sends the exit command (`0x18`) the official demo app's Exit button uses after a bitmap; it is not in the protocol doc. If it does nothing, that's expected — double-tapping a TouchBar always exits.
 - **Page-status nibbles**: first page is sent as "Even AI displaying", taps re-send pages in "manual mode" per the official doc; if paging misbehaves, capture `g1 -v chat` logs.
 
 ## The hub
@@ -131,6 +134,18 @@ permanent screen for experiments (gestures are dead while it is up).
 +----------------------------------------+      +----------------------------------------+
 ```
 
+**The cockpit.** `g1 cockpit` draws an always-on reticle as a one-bit bitmap on
+both lenses: 90° marks in the four corners, a plain cross dead centre, the time
+inside the top-left corner and the lower arm's charge inside the bottom-right,
+redrawn every minute; Ctrl+C hands the lens back. `--sim` prints it as ASCII,
+`--save FILE.bmp` writes the file, `--once` leaves it on the lens, `--battery 58`
+shows that charge instead of the arms' reports. The upload
+follows the official demo app (194-byte `0x15` packets to a fixed storage
+address, the `0x20 0x0D 0x0E` finish handshake, then a CRC-32 under `0x16`) and
+has not been tried on hardware yet. Two things to measure there: whether a
+bitmap page lets the long-press through (text pages do not), and what a triple
+tap does while it is up (the firmware's silent-mode toggle).
+
 | Where | Long-press left | Right / left tap | Double tap |
 |---|---|---|---|
 | At rest (glasses' dashboard) | ask the current agent | firmware's own | firmware's own |
@@ -181,11 +196,13 @@ fail with a message naming the field before anything connects.
 - [session.py](src/g1bridge/session.py) — `HubSession`: display events + terminal lines → state machine → agents
 - [display.py](src/g1bridge/display.py) — the `Display` protocol both transports satisfy
 - [sim.py](src/g1bridge/sim.py) — terminal simulator: ASCII HUD frames, typed gestures
-- [cli.py](src/g1bridge/cli.py) — `g1 scan | probe | hello | events | chat | hub | clear`
+- [bitmap.py](src/g1bridge/bitmap.py) — one-bit 576×136 canvas and the BMP file the glasses accept, with a 5×7 readout face
+- [cockpit.py](src/g1bridge/cockpit.py) — the reticle: corner marks, centre cross, clock, charge
+- [cli.py](src/g1bridge/cli.py) — `g1 scan | probe | hello | events | chat | hub | cockpit | clear`
 
 ## Testing
 
-`uv run pytest` — pure logic (framing, parsing, pagination, hub state machine, agent registry) is fully unit-tested, and `HubSession` is exercised end-to-end on the simulator with a stub agent. The BLE transport is hardware I/O and exempt from unit coverage in this prototype; it's verified on-device via `g1 events` / `g1 hello`.
+`uv run pytest` — pure logic (framing, parsing, pagination, hub state machine, agent registry, the bitmap canvas and the cockpit reticle) is fully unit-tested, and `HubSession` is exercised end-to-end on the simulator with a stub agent. The BLE transport is hardware I/O and exempt from unit coverage in this prototype; it's verified on-device via `g1 events` / `g1 hello`.
 
 ## Protocol references
 
