@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +31,8 @@ RETRY_PAUSE_S = 2.0
 # Official rule: send to the right arm only after the left acknowledges. If the
 # ack never comes we still send, so a mute left arm cannot blank the right one.
 ACK_TIMEOUT_S = 1.0
+MIC_ATTEMPTS = 2
+MIC_RETRY_PAUSE_S = 0.5
 
 # Below this the arms hear our connect request only by luck. Real numbers seen:
 # -66 dBm about a metre away in the open; -85/-90 dBm from the closed case.
@@ -188,7 +190,14 @@ class GlassArm:
 
     def _handle_notify(self, _characteristic, data: bytearray) -> None:
         event = parse_notification(self.side, bytes(data))
-        logger.debug("%s <- %s (%s)", self.name, bytes(data).hex(), event.kind.value)
+        if event.kind is EventKind.MIC_DATA:
+            logger.debug(
+                "%s <- mic seq=%d %dB", self.name, event.seq, len(event.payload)
+            )
+        else:
+            logger.debug(
+                "%s <- %s (%s)", self.name, bytes(data).hex(), event.kind.value
+            )
         logger.debug("%s notify: %s %s", self.side, event.kind.value, event.raw.hex())
         if self._on_event is not None:
             self._on_event(event)
@@ -211,7 +220,9 @@ class G1Glasses:
         self.right = GlassArm("right", right_address, right_name, self._dispatch)
         self.events: asyncio.Queue[G1Event] = asyncio.Queue()
         self._listeners: list[Callable[[G1Event], None]] = []
-        self._waiters: tuple[tuple[EventKind, str, asyncio.Future[G1Event]], ...] = ()
+        self._waiters: tuple[
+            tuple[frozenset[EventKind], str, asyncio.Future[G1Event]], ...
+        ] = ()
         self._heartbeat_task: asyncio.Task | None = None
         self._seq = 0
 
@@ -297,6 +308,13 @@ class G1Glasses:
         await self.left.connect()
         await self.right.connect()
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        # A mic left streaming by an earlier session keeps streaming forever.
+        # Best effort: a hiccup here must not fail a connect that succeeded.
+        try:
+            if await self.set_mic(False):
+                logger.debug("mic reset acknowledged")
+        except Exception as exc:  # BleakError/OSError from the write
+            logger.warning("mic reset failed (%s); carrying on", exc)
 
     async def disconnect(self) -> None:
         if self._heartbeat_task is not None:
@@ -313,18 +331,51 @@ class G1Glasses:
 
     def _dispatch(self, event: G1Event) -> None:
         self.events.put_nowait(event)
-        for kind, side, future in self._waiters:
-            if kind is event.kind and side == event.side and not future.done():
+        for kinds, side, future in self._waiters:
+            if event.kind in kinds and side == event.side and not future.done():
                 future.set_result(event)
         self._waiters = tuple(w for w in self._waiters if not w[2].done())
         for listener in self._listeners:
             listener(event)
 
-    def expect(self, kind: EventKind, side: str) -> asyncio.Future[G1Event]:
-        """A future resolved by the next event of `kind` from `side`."""
+    def expect(
+        self, kinds: EventKind | Iterable[EventKind], side: str
+    ) -> asyncio.Future[G1Event]:
+        """A future resolved by the next event of one of `kinds` from `side`."""
+        wanted = frozenset([kinds] if isinstance(kinds, EventKind) else kinds)
         future: asyncio.Future[G1Event] = asyncio.get_running_loop().create_future()
-        self._waiters = (*self._waiters, (kind, side, future))
+        self._waiters = (*self._waiters, (wanted, side, future))
         return future
+
+    async def set_mic(self, enable: bool, timeout: float = ACK_TIMEOUT_S) -> bool:
+        """0x0E to the right arm (where the mic is). True if the glasses said OK.
+
+        Hardware note (2026-09-03): the firmware starts streaming on a long-press
+        by itself and keeps going until told to stop, so the off command is the
+        important half.
+        """
+        for attempt in range(MIC_ATTEMPTS):
+            reply = self.expect({EventKind.MIC_OK, EventKind.MIC_FAIL}, "right")
+            try:
+                await self.right.write(protocol.mic_control(enable))
+                event = await asyncio.wait_for(reply, timeout)
+            except (TimeoutError, asyncio.TimeoutError):
+                logger.warning(
+                    "right arm did not answer mic %s", "on" if enable else "off"
+                )
+                event = None
+            except (BleakError, OSError) as exc:
+                logger.warning(
+                    "mic %s write failed: %s", "on" if enable else "off", exc
+                )
+                event = None
+            if event is not None and event.kind is EventKind.MIC_OK:
+                return True
+            if attempt + 1 < MIC_ATTEMPTS:
+                # Seen on hardware: the first enable right after a long-press is
+                # refused (0xCA) while the firmware is still switching screens.
+                await asyncio.sleep(MIC_RETRY_PAUSE_S)
+        return False
 
     async def send_acked(self, frame: bytes, timeout: float = ACK_TIMEOUT_S) -> bool:
         """Left first; right after the left's ack (official protocol rule).

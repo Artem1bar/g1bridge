@@ -3,13 +3,19 @@
 import pytest
 
 from g1bridge.agents import AgentSpec
+from datetime import datetime
+
 from g1bridge.hub import (
+    HOME_TITLE,
     HUB_TITLE,
     Action,
     HubState,
     Mode,
     close_agent,
     find_agent,
+    go_home,
+    parse_voice,
+    render_home,
     render_menu,
     select,
     step,
@@ -26,7 +32,7 @@ def ev(kind: EventKind, side: str = "right") -> G1Event:
 
 
 def test_menu_taps_move_cursor_and_wrap():
-    state = HubState(AGENTS)
+    state = HubState(AGENTS, mode=Mode.MENU)
     state, action = step(state, ev(EventKind.SINGLE_TAP, "right"))
     assert (state.cursor, action) == (1, Action.SHOW_MENU)
     state, _ = step(state, ev(EventKind.SINGLE_TAP, "left"))
@@ -37,7 +43,7 @@ def test_menu_taps_move_cursor_and_wrap():
 
 
 def test_long_press_opens_selected_agent():
-    state = HubState(AGENTS, cursor=2)
+    state = HubState(AGENTS, mode=Mode.MENU, cursor=2)
     assert state.active is None
     state, action = step(state, ev(EventKind.AI_START, "left"))
     assert action is Action.OPEN_AGENT
@@ -50,29 +56,64 @@ def test_agent_mode_gestures():
     assert step(state, ev(EventKind.SINGLE_TAP, "right"))[1] is Action.PAGE_NEXT
     assert step(state, ev(EventKind.SINGLE_TAP, "left"))[1] is Action.PAGE_PREV
     assert step(state, ev(EventKind.AI_START, "left"))[1] is Action.NEW_PROMPT
-    back, action = step(state, ev(EventKind.TRIPLE_TAP))
+    back, action = close_agent(state)
     assert action is Action.CLOSE_AGENT
     assert back.mode is Mode.MENU and back.cursor == 1  # selection remembered
 
 
-def test_double_tap_exits_hub_in_both_modes():
+def test_double_tap_exits_hub_in_every_mode():
     # The firmware treats a double tap as "exit app"; the hub must agree.
-    assert step(HubState(AGENTS), ev(EventKind.DOUBLE_TAP))[1] is Action.EXIT_HUB
-    in_agent = HubState(AGENTS, mode=Mode.AGENT)
-    assert step(in_agent, ev(EventKind.DOUBLE_TAP))[1] is Action.EXIT_HUB
+    for mode in Mode:
+        state = HubState(AGENTS, mode=mode)
+        assert step(state, ev(EventKind.DOUBLE_TAP))[1] is Action.EXIT_HUB
+
+
+def test_home_gestures():
+    home = HubState(AGENTS)
+    assert home.mode is Mode.HOME
+    menu, action = step(home, ev(EventKind.SINGLE_TAP, "left"))
+    assert action is Action.SHOW_MENU and menu.mode is Mode.MENU
+    talk, action = step(HubState(AGENTS, cursor=4), ev(EventKind.AI_START, "left"))
+    assert action is Action.OPEN_AGENT and talk.active == AGENTS[0]
+    assert step(home, ev(EventKind.TRIPLE_TAP))[1] is Action.NONE
+
+
+def test_triple_tap_is_left_to_the_firmware():
+    # It toggles silent mode on the glasses (F5 04 / F5 05), so the hub ignores it.
+    for mode in Mode:
+        state = HubState(AGENTS, mode=mode, cursor=2)
+        assert step(state, ev(EventKind.TRIPLE_TAP)) == (state, Action.NONE)
+
+
+def test_go_home_from_anywhere():
+    for mode in (Mode.MENU, Mode.AGENT):
+        home, action = go_home(HubState(AGENTS, mode=mode))
+        assert action is Action.SHOW_HOME and home.mode is Mode.HOME
+    assert go_home(HubState(AGENTS))[1] is Action.NONE
+
+
+def test_render_home_shows_clock_and_hints():
+    when = datetime(2026, 9, 3, 19, 27)
+    text = render_home(HubState(AGENTS), when, lines_per_page=5, max_chars=40)
+    lines = text.split("\n")
+    assert lines[0] == "19:27  Thu 3 Sep"
+    assert lines[1] == HOME_TITLE
+    assert "Agent1" in lines[2]
+    assert "7 agents" in lines[3]
+    assert len(lines) <= 5 and all(len(line) <= 40 for line in lines)
 
 
 def test_irrelevant_events_are_noops():
-    state = HubState(AGENTS)
-    for kind in (EventKind.HEARTBEAT_ACK, EventKind.WEARING, EventKind.TRIPLE_TAP):
+    state = HubState(AGENTS, mode=Mode.MENU)
+    for kind in (EventKind.HEARTBEAT_ACK, EventKind.WEARING, EventKind.AI_STOP):
         new_state, action = step(state, ev(kind))
         assert new_state == state and action is Action.NONE
 
 
 def test_step_is_pure():
-    state = HubState(AGENTS)
+    state = HubState(AGENTS, mode=Mode.MENU)
     step(state, ev(EventKind.SINGLE_TAP))
-    assert state.cursor == 0
+    assert state.cursor == 0 and state.mode is Mode.MENU
 
 
 def test_select_by_index_and_lookup():
@@ -121,10 +162,32 @@ def test_hub_state_rejects_empty_agent_list():
         HubState(())
 
 
-def test_close_agent_by_word():
+def test_close_agent_by_word_goes_one_level_up():
     in_agent = HubState(AGENTS, mode=Mode.AGENT, cursor=3)
-    back, action = close_agent(in_agent)
-    assert action is Action.CLOSE_AGENT and back.mode is Mode.MENU
-    assert back.cursor == 3
-    same, action = close_agent(HubState(AGENTS))
-    assert action is Action.NONE and same == HubState(AGENTS)
+    menu, action = close_agent(in_agent)
+    assert action is Action.CLOSE_AGENT and menu.mode is Mode.MENU
+    assert menu.cursor == 3
+    home, action = close_agent(menu)
+    assert action is Action.SHOW_HOME and home.mode is Mode.HOME
+    same, action = close_agent(home)
+    assert action is Action.NONE and same == home
+
+
+def test_rest_flow_gestures():
+    rest = HubState(AGENTS, mode=Mode.REST, rest=True)
+    talk, action = step(rest, ev(EventKind.AI_START, "left"))
+    assert action is Action.OPEN_AGENT and talk.mode is Mode.AGENT
+    dismissed, action = step(talk, ev(EventKind.DOUBLE_TAP))
+    assert action is Action.SHOW_REST and dismissed.mode is Mode.REST
+    assert step(rest, ev(EventKind.SINGLE_TAP))[1] is Action.NONE
+    assert close_agent(talk) == (dismissed, Action.SHOW_REST)
+    assert go_home(talk) == (dismissed, Action.SHOW_REST)
+    assert go_home(rest)[1] is Action.NONE
+
+
+def test_parse_voice_prefixes():
+    assert parse_voice(AGENTS, "Agent3, what is LC3?") == (2, "what is LC3?")
+    assert parse_voice(AGENTS, "open agent5") == (4, "")
+    assert parse_voice(AGENTS, "switch to Agent2 please") == (1, "please")
+    assert parse_voice(AGENTS, "what is the weather") == (None, "what is the weather")
+    assert parse_voice(AGENTS, "  ") == (None, "")

@@ -28,7 +28,9 @@ GESTURES: dict[str, tuple[EventKind, str]] = {
     "release": (EventKind.AI_STOP, "left"),
     "on": (EventKind.WEARING, "left"),
     "off": (EventKind.TAKEN_OFF, "left"),
+    "mic": (EventKind.MIC_DATA, "right"),  # one fake 100 ms audio packet
 }
+FAKE_MIC_PAYLOAD = bytes(200)
 GESTURE_HELP = (
     "gestures: r/l = tap right/left, rrr/lll = triple tap (back to menu), "
     "rr/ll = double tap (leave), hold = long-press left temple; anything else "
@@ -42,6 +44,8 @@ def parse_gesture(line: str) -> G1Event | None:
     if hit is None:
         return None
     kind, side = hit
+    if kind is EventKind.MIC_DATA:
+        return G1Event(kind=kind, side=side, raw=b"", seq=0, payload=FAKE_MIC_PAYLOAD)
     return G1Event(kind=kind, side=side, raw=b"")
 
 
@@ -78,6 +82,7 @@ class SimGlasses:
         self._listeners: list[Callable[[G1Event], None]] = []
         self.pages_shown: list[str] = []
         self.dashboard_calls = 0
+        self.mic_calls: list[bool] = []
 
     async def send_text_page(
         self,
@@ -109,6 +114,11 @@ class SimGlasses:
     async def exit_to_dashboard(self) -> None:
         self.dashboard_calls += 1
         self._out("[HUD] back to the dashboard")
+
+    async def set_mic(self, enable: bool) -> bool:
+        self.mic_calls.append(enable)
+        self._out(f"[mic] {'on' if enable else 'off'}")
+        return True
 
     async def disconnect(self) -> None:
         return None

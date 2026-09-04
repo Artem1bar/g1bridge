@@ -15,9 +15,12 @@ from .agents import AGENTS_PATH, load_agents
 from .ble import G1Glasses, save_config, signal_hint
 from .display import Display
 from .hud import HudText
+from .micstream import MicStats, append_payloads
 from .paginate import DEFAULT_CHARS_PER_LINE, DEFAULT_LINES_PER_PAGE
+from .protocol import EventKind, G1Event
 from .session import HubSession
 from .sim import SimGlasses
+from .stt import DEFAULT_MODEL, WhisperTranscriber
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,15 @@ def main() -> None:
 
     sub.add_parser("scan", help="find the glasses and save their addresses")
     sub.add_parser("probe", help="diagnose: test advertising + connection for each arm")
-    sub.add_parser("events", help="stream parsed TouchBar/wear events (Ctrl+C to stop)")
+    events = sub.add_parser(
+        "events", help="stream parsed TouchBar/wear events (Ctrl+C to stop)"
+    )
+    events.add_argument(
+        "--record",
+        type=Path,
+        default=None,
+        help="append raw microphone (LC3) payloads to this file",
+    )
     sub.add_parser("clear", help="exit to the dashboard (experimental command)")
 
     hello = sub.add_parser("hello", help="connect and put test text on the HUD")
@@ -48,6 +59,51 @@ def main() -> None:
         "--sim", action="store_true", help="no glasses: render the HUD in the terminal"
     )
     hub.add_argument(
+        "--trace",
+        action="store_true",
+        help="print every gesture event the glasses send",
+    )
+    hub.add_argument(
+        "--home",
+        action="store_true",
+        help="show our own home page instead of resting on the glasses' dashboard "
+        "(gestures are dead while app content is on screen)",
+    )
+    hub.add_argument(
+        "--text-show",
+        action="store_true",
+        help="send answer pages as Text Show instead of Even AI statuses",
+    )
+    hub.add_argument(
+        "--mic-cmd",
+        action="store_true",
+        help="send the documented mic-on command on long-press (the glasses "
+        "stream by themselves; after this command they stop reporting the release)",
+    )
+    hub.add_argument(
+        "--record-dir",
+        type=Path,
+        default=None,
+        help="save every voice capture as <dir>/<HHMMSS>.lc3 for offline analysis",
+    )
+    hub.add_argument(
+        "--stt",
+        choices=("whisper", "none"),
+        default="whisper",
+        help="speech-to-text for the long-press (default: whisper.cpp, offline)",
+    )
+    hub.add_argument(
+        "--stt-model",
+        default=DEFAULT_MODEL,
+        help=f"whisper.cpp model name (default: {DEFAULT_MODEL})",
+    )
+
+    transcribe = sub.add_parser(
+        "transcribe", help="run the voice pipeline on a file saved by `events --record`"
+    )
+    transcribe.add_argument("file", type=Path)
+    transcribe.add_argument("--stt-model", default=DEFAULT_MODEL)
+    hub.add_argument(
         "--agents",
         type=Path,
         default=AGENTS_PATH,
@@ -61,12 +117,13 @@ def main() -> None:
         command.add_argument(
             "--no-web", action="store_true", help="disable WebSearch/WebFetch"
         )
-    for command in (hello, chat, hub):
+    for command in (hello, chat):
         command.add_argument(
             "--ai",
             action="store_true",
             help="send pages with Even AI statuses instead of plain Text Show",
         )
+    for command in (hello, chat, hub):
         command.add_argument(
             "--chars", type=int, default=DEFAULT_CHARS_PER_LINE, help="chars per line"
         )
@@ -99,6 +156,9 @@ async def _run(args: argparse.Namespace) -> None:
     if args.command == "probe":
         await _probe()
         return
+    if args.command == "transcribe":
+        _transcribe_file(args)
+        return
     if args.command == "hub":
         agents = load_agents(args.agents)  # fail on bad TOML before the slow connect
         if args.sim:
@@ -113,7 +173,7 @@ async def _run(args: argparse.Namespace) -> None:
         if args.command == "hello":
             await _hello(glasses, args)
         elif args.command == "events":
-            await _events(glasses)
+            await _events(glasses, args.record)
         elif args.command == "clear":
             await glasses.exit_to_dashboard()
             print(
@@ -266,18 +326,40 @@ async def _hello(glasses: G1Glasses, args: argparse.Namespace) -> None:
     await asyncio.Event().wait()
 
 
-async def _events(glasses: G1Glasses) -> None:
+async def _events(glasses: G1Glasses, record: Path | None) -> None:
     print(
         "Listening for events (tap the TouchBars, take the glasses on/off)... Ctrl+C to stop."
     )
+    if record is not None:
+        print(f"Recording microphone payloads to {record}")
+    stats = MicStats()
+    pending: list[G1Event] = []
     while True:
-        event = await glasses.events.get()
-        extra = (
-            f" seq={event.seq} {len(event.payload)}B" if event.seq is not None else ""
-        )
-        print(
-            f"  [{event.side:>5}] {event.kind.value:<16} raw={event.raw.hex()}{extra}"
-        )
+        try:
+            event = await asyncio.wait_for(glasses.events.get(), timeout=1.0)
+        except (TimeoutError, asyncio.TimeoutError):
+            stats, pending = _flush_mic(stats, pending, record)
+            continue
+        if event.kind is EventKind.MIC_DATA:
+            stats = stats.add(event)
+            pending.append(event)
+            continue
+        stats, pending = _flush_mic(stats, pending, record)
+        print(f"  [{event.side:>5}] {event.kind.value:<16} raw={event.raw.hex()}")
+
+
+def _flush_mic(
+    stats: MicStats, pending: list[G1Event], record: Path | None
+) -> tuple[MicStats, list[G1Event]]:
+    """Print one summary line for the mic packets seen so far and save them."""
+    if not pending:
+        return stats, pending
+    line = stats.summary("right")
+    if record is not None:
+        written = append_payloads(record, pending)
+        line += f" -> {written} B saved"
+    print(line)
+    return MicStats(), []
 
 
 async def _chat(glasses: G1Glasses, args: argparse.Namespace) -> None:
@@ -310,12 +392,25 @@ async def _chat(glasses: G1Glasses, args: argparse.Namespace) -> None:
 
 async def _hub(display: Display, agents, args: argparse.Namespace) -> None:
     where = "simulated HUD below" if args.sim else "the glasses"
-    print(f"Hub with {len(agents)} agents on {where}. Ctrl+D or /quit to leave.")
+    flow = "our home page" if args.home else "resting on the glasses' dashboard"
+    print(
+        f"Hub with {len(agents)} agents on {where}, {flow}. Ctrl+D or /quit to leave."
+    )
     if args.agents.exists():
         print(f"(agents merged from {args.agents})")
 
     def factory(spec):
         return GlassesAgent.for_spec(spec, model=args.model, web_search=not args.no_web)
+
+    transcriber = None
+    if args.stt == "whisper" and not args.sim:
+        transcriber = WhisperTranscriber(args.stt_model)
+        print(
+            f"Loading speech model {args.stt_model} (first run downloads it and "
+            "compiles Metal shaders; ~20s)..."
+        )
+        await asyncio.get_running_loop().run_in_executor(None, transcriber.warm)
+        print("Speech model ready. Hold the left temple to talk.")
 
     session = HubSession(
         display,
@@ -324,9 +419,37 @@ async def _hub(display: Display, agents, args: argparse.Namespace) -> None:
         max_chars=args.chars,
         lines_per_page=args.lines,
         sim_gestures=args.sim,
-        ai_mode=args.ai,
+        ai_mode=not args.text_show,
+        trace=args.trace,
+        transcriber=transcriber,
+        rest=not args.home,
+        mic_cmd=args.mic_cmd,
+        record_dir=args.record_dir,
     )
     await session.run(stdin_lines())
+
+
+def _transcribe_file(args: argparse.Namespace) -> None:
+    """Decode + transcribe a recording; the offline test bench for the voice path."""
+    import time
+
+    from .audio import decode_lc3, rms
+    from .stt import transcribe_pcm
+
+    payloads = args.file.read_bytes()
+    pcm = decode_lc3(payloads)
+    print(
+        f"{args.file}: {len(payloads)} B -> {pcm.size} samples "
+        f"({pcm.size / 16000:.1f}s), rms={rms(pcm):.4f}"
+    )
+    transcriber = WhisperTranscriber(args.stt_model)
+    started = time.perf_counter()
+    transcriber.warm()
+    print(f"model {args.stt_model} loaded in {time.perf_counter() - started:.1f}s")
+    started = time.perf_counter()
+    text = transcribe_pcm(transcriber._get_model(), pcm, max_seconds=None)
+    print(f"transcribed in {time.perf_counter() - started:.1f}s:")
+    print(f"  {text or '(nothing recognised)'}")
 
 
 async def stdin_lines(prompt: str = "you> ") -> AsyncIterator[str]:

@@ -44,3 +44,8 @@ def test_sim_glasses_records_pages_and_dispatches_events():
     sim.add_listener(got.append)
     sim.inject(parse_gesture("hold"))
     assert got[0].kind is EventKind.AI_START
+
+
+def test_mic_word_is_a_fake_audio_packet():
+    event = parse_gesture("mic")
+    assert event.kind is EventKind.MIC_DATA and len(event.payload) == 200

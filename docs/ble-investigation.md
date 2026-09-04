@@ -50,6 +50,24 @@ the old behaviour for comparison). With both fixes in place (19:26) `g1 hello` r
 Which of the two mattered is untested; `g1 hello --ai` isolates the status
 byte if anyone cares. `g1 -v hello` logs every notification byte.
 
+**Gestures, 19:39** (`g1 events`, nothing of ours on screen): long-press
+arrives (`F5 17`/`F5 18`, left arm); double tap arrives on both arms and the
+firmware opens its dashboard; triple tap arrives as the silent-mode toggle
+(`F5 04` then `F5 05`); **single taps do not arrive at all** in this state.
+Head up/down (`F5 02`/`F5 03`) precede the firmware's dashboard open/close.
+`F5 0A nn` is a per-arm battery percent (right 0x25→0x24, left 0x21→0x20
+over four minutes of mic streaming). `0x22`-prefixed messages (`22 08 ...` and
+`22 0a ...`) remain unexplained.
+
+**Microphone, 19:37.** During `g1 events`, after a long-press on the left
+temple, the right arm streamed `0xF1` packets by itself: 200-byte payloads,
+sequence byte +1 per packet, ten packets a second (100 ms of audio each at the
+G1's LC3 rate), with no `0x0E 0x01` mic-enable from us. A `0x22` message
+(`22 08 00 00 02 00 00 NN`) ticked once a second alongside it, NN counting up:
+almost certainly the recording timer. `g1 events --record FILE` saves the raw
+payloads for offline decoding; `g1 events` folds the stream into one line per
+second so gestures stay visible.
+
 Everything below is kept as the record of what was ruled out.
 
 ## Symptom (historical)

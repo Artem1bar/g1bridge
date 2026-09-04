@@ -84,3 +84,24 @@ def test_known_device_rejects_malformed_identifier_without_touching_bluetooth():
     # A bad UUID string must come back None before any CBCentralManager exists
     # (creating one would raise the OS permission prompt in a headless run).
     assert asyncio.run(known_device("not-a-uuid")) is None
+
+
+def test_shared_manager_is_reused_within_a_loop():
+    import asyncio
+
+    from g1bridge.macos import _shared_manager
+
+    made: list[object] = []
+
+    def factory():
+        made.append(object())
+        return made[-1]
+
+    async def go():
+        first = _shared_manager(factory)
+        second = _shared_manager(factory)
+        assert first is second
+
+    asyncio.run(go())
+    asyncio.run(go())  # a new loop gets a new manager, the old one is dropped
+    assert len(made) == 2

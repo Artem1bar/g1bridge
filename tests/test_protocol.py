@@ -94,3 +94,15 @@ def test_parse_unknown_and_empty():
     assert parse_notification("left", b"").kind is EventKind.UNKNOWN
     assert parse_notification("left", bytes([0xF5, 0x7E])).kind is EventKind.UNKNOWN
     assert parse_notification("left", bytes([0x99, 0x01])).kind is EventKind.UNKNOWN
+
+
+def test_head_gestures_and_battery_are_distinct_from_dashboard_events():
+    from g1bridge.protocol import EventKind, parse_notification
+
+    assert parse_notification("right", bytes([0xF5, 0x02])).kind is EventKind.HEAD_UP
+    assert parse_notification("right", bytes([0xF5, 0x03])).kind is EventKind.HEAD_DOWN
+    assert (
+        parse_notification("left", bytes([0xF5, 0x1E])).kind is EventKind.DASHBOARD_OPEN
+    )
+    battery = parse_notification("left", bytes([0xF5, 0x0A, 0x21]) + bytes(18))
+    assert battery.kind is EventKind.BATTERY and battery.payload == b"\x21"

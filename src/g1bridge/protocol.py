@@ -57,8 +57,11 @@ class EventKind(Enum):
     WEARING = "wearing"
     TAKEN_OFF = "taken_off"
     CRADLE = "cradle"
+    HEAD_UP = "head_up"
+    HEAD_DOWN = "head_down"
     DASHBOARD_OPEN = "dashboard_open"
     DASHBOARD_CLOSE = "dashboard_close"
+    BATTERY = "battery"  # F5 0A <percent>; observed draining 1%/4 min on hardware
     MIC_OK = "mic_ok"
     MIC_FAIL = "mic_fail"
     MIC_DATA = "mic_data"
@@ -70,8 +73,9 @@ class EventKind(Enum):
 _F5_EVENTS = {
     0x00: EventKind.DOUBLE_TAP,
     0x01: EventKind.SINGLE_TAP,
-    0x02: EventKind.DASHBOARD_OPEN,
-    0x03: EventKind.DASHBOARD_CLOSE,
+    0x02: EventKind.HEAD_UP,  # confirmed 2026-09-03 (precedes dashboard_open)
+    0x03: EventKind.HEAD_DOWN,
+    0x0A: EventKind.BATTERY,  # value byte follows; see parse_notification
     0x04: EventKind.TRIPLE_TAP,  # silent mode on
     0x05: EventKind.TRIPLE_TAP,  # silent mode off
     0x06: EventKind.WEARING,
@@ -146,6 +150,8 @@ def parse_notification(side: str, data: bytes) -> G1Event:
     cmd = raw[0]
     if cmd == Cmd.EVENT and len(raw) >= 2:
         kind = _F5_EVENTS.get(raw[1], EventKind.UNKNOWN)
+        if kind is EventKind.BATTERY and len(raw) >= 3:
+            return G1Event(kind, side, raw, payload=raw[2:3])
         return G1Event(kind, side, raw)
     if cmd == Cmd.MIC_DATA and len(raw) >= 2:
         return G1Event(EventKind.MIC_DATA, side, raw, seq=raw[1], payload=raw[2:])

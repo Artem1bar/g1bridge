@@ -185,6 +185,22 @@ class KnownDevice:
     state: str  # "connected" when macOS itself is holding the link
 
 
+_manager_for_loop: tuple[Any, Any] | None = None  # (loop, manager)
+
+
+def _shared_manager(factory: Any) -> Any:
+    """One CBCentralManager per event loop; retries and both arms reuse it.
+
+    Keeps the loop object itself (not its id, which a later loop may reuse)
+    so a stale manager from a finished loop is never handed out.
+    """
+    global _manager_for_loop
+    loop = asyncio.get_running_loop()
+    if _manager_for_loop is None or _manager_for_loop[0] is not loop:
+        _manager_for_loop = (loop, factory())
+    return _manager_for_loop[1]
+
+
 async def known_device(
     identifier: str, timeout: float = STATE_TIMEOUT_S
 ) -> KnownDevice | None:
@@ -212,7 +228,7 @@ async def known_device(
     uuid = NSUUID.alloc().initWithUUIDString_(identifier)
     if uuid is None:
         return None
-    manager = CentralManagerDelegate()
+    manager = _shared_manager(CentralManagerDelegate)
     try:
         await asyncio.wait_for(manager.wait_until_ready(), timeout)
     except (BleakError, TimeoutError, asyncio.TimeoutError) as exc:

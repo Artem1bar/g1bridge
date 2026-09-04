@@ -21,7 +21,7 @@ Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (
 | HUD display | **Works on both arms** (2026-09-03) — after switching to the official left-ack-then-right handshake and plain Text Show status |
 | Tap paging / gesture events | Next up — `g1 events` not yet run |
 | Agent hub (menu of Claude agents on the HUD, TouchBar navigation) | **Built** — state machine + terminal simulator, 55 unit tests; runs end-to-end with `g1 hub --sim`; not yet seen on hardware |
-| Voice input (glasses mic → STT → Claude) | Not built yet — next milestone |
+| Voice input (glasses mic → LC3 decode → whisper.cpp → Claude → HUD) | **Works end to end on the glasses** (2026-09-03 22:47): hold the left temple, "What is the capital of France?" → "Paris." on the HUD; 5.4 s capture, 0.8 s transcription, offline, no key |
 
 ## Prerequisites
 
@@ -58,29 +58,40 @@ Useful flags: `g1 -v ...` (debug logging), `g1 chat --chars 44 --lines 5` (displ
 
 ## The hub
 
-`g1 hub` turns the HUD into a launcher: a menu of Claude agents, each with its
-own role prompt, tool access and multi-turn memory.
+`g1 hub` puts Claude agents behind the glasses' own hold-to-talk gesture.
+At rest the glasses stay on their normal dashboard. Hold the left temple, ask,
+let go: the answer arrives as an Even AI result, pages with the temple taps,
+and a double tap dismisses it. Say an agent's name first to switch ("research
+what is LC3", "translate good morning", "draft a text to Sam"), and "back" or
+"home" as words. Each agent has its own role prompt, tool access and multi-turn
+memory. Speech recognition runs on the Mac, offline, with no API key.
+
+`--home` shows our own clock page and agent list instead (below); it is kept
+for experiments, because on hardware the firmware keeps every TouchBar gesture
+to itself while app content is on screen, so nothing but voice works there.
 
 ```
-+----------------------------------------+
-|CLAUDE HUB                           2/5|
-|  Ask       quick answers, web on       |
-|> Research  digs in, cites sources      |
-|  Translate any language <-> English    |
-|  Explain   a term or idea, simply      |
-+----------------------------------------+
++----------------------------------------+      +----------------------------------------+
+|19:27  Thu 3 Sep                        |      |CLAUDE HUB                           2/5|
+|Claude Hub                              |  tap |  Ask       quick answers, web on       |
+|hold left temple: talk to Ask           | ---> |> Research  digs in, cites sources      |
+|tap: 5 agents                           |      |  Translate any language <-> English    |
+|                                        |      |  Explain   a term or idea, simply      |
++----------------------------------------+      +----------------------------------------+
 ```
 
-| Where | Right tap | Left tap | Long-press left | Triple tap | Double tap |
-|---|---|---|---|---|---|
-| Menu | next agent | previous agent | open the agent | — | leave the hub |
-| Inside an agent | next page | previous page | new question (voice, once built) | back to the menu | leave the hub |
+| Where | Long-press left | Right / left tap | Double tap |
+|---|---|---|---|
+| At rest (glasses' dashboard) | ask the current agent | firmware's own | firmware's own |
+| Answer on screen | new question, or "send" if the release wasn't reported | next / previous page (to confirm) | dismiss, back to rest |
 
-Double tap is the G1 firmware's own "exit app" gesture, so the hub treats it the
-same way everywhere rather than fighting it. Triple tap is how the community G1
-launcher switches apps, so it is "back" here, but the firmware also uses it to
-toggle silent mode, which is unverified on hardware; typing `back` or `menu`
-(and later saying it) always works.
+Measured on hardware (2026-09-03): the long-press arrives as its own event and
+the right arm streams microphone audio by itself; the release is reported only
+if we never sent the documented mic-on command, so that command is off by
+default (`--mic-cmd` restores it). A double tap is the firmware's "exit app"
+and it tells us so. A triple tap toggles the firmware's silent mode. While our
+own page is on screen the firmware forwards no taps and no long-press, which
+is why the hub rests on the firmware's dashboard.
 
 Until voice lands, questions are typed in the terminal; the answer pages onto
 the HUD. Typing an agent's number or name in the menu opens it too.
@@ -133,6 +144,6 @@ fail with a message naming the field before anything connects.
 ## Roadmap
 
 1. **Hub on real glasses**: connection works as of 2026-09-03; next confirm text renders (`g1 hello`), taps arrive (`g1 events`), then the gesture map and line widths under `g1 hub`.
-2. **Voice**: long-press the left temple → glasses mic streams LC3 audio → decode → STT → the open agent → HUD (the stock Even AI flow, but with our agents). The hub already routes the long-press to a "new question" hook.
+2. **Voice on the glasses end-to-end**: the pipeline (LC3 → whisper.cpp small.en, `lc3py` + `pywhispercpp`) is built and validated offline with `g1 transcribe`; confirm the hold-to-talk round trip on the HUD and tune the silence gate on more recordings.
 3. **Tools that make agents useful**: calendar, reminders, home control, notes with memory — added per agent in `~/.g1bridge-agents.toml`.
 4. **Daily-driver platform decision**: keep the Mac bridge for hacking, then either a MentraOS app or a custom companion app so it works away from the desk. The hub and agent layers are transport-agnostic (`Display` protocol), so a phone-side transport slots in without rewriting them.
