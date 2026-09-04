@@ -6,12 +6,12 @@
 
 Talk to a Claude agent through your **Even Realities G1** smart glasses — no phone app in the loop.
 
-Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (running through the local `claude` CLI, billed to your existing Claude subscription — no API key) answers onto the heads-up display. TouchBar taps page through long answers.
+Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (built on the Claude Agent SDK, authenticated with your Anthropic API key) answers onto the heads-up display. TouchBar taps page through long answers.
 
 ```
 ┌────────────┐   BLE (two arms)   ┌────────────┐   claude-agent-sdk   ┌──────────────┐
-│ G1 glasses │◄──────────────────►│  your Mac  │◄────────────────────►│  claude CLI  │
-│ HUD + taps │                    │  g1bridge  │                      │ (Max/Pro sub)│
+│ G1 glasses │◄──────────────────►│  your Mac  │◄────────────────────►│  Claude API  │
+│ HUD + taps │                    │  g1bridge  │                      │  (API key)   │
 └────────────┘                    └────────────┘                      └──────────────┘
 ```
 
@@ -31,16 +31,21 @@ uv run g1 hub --sim      # the whole hub on a simulated HUD in your terminal
 uv run g1 --help
 ```
 
-Answers come from the local `claude` CLI (logged in; no API key), so `g1 chat`
-and the hub need it installed. Framing, pagination, the simulator and the tests
-run without it.
+Answers come from Claude through the Claude Agent SDK (which bundles the Claude
+Code runtime it drives), so `g1 chat` and the hub need an Anthropic API key
+exported as `ANTHROPIC_API_KEY`. Framing, pagination, the simulator and the
+tests run without it.
+
+On your own machine you can leave `ANTHROPIC_API_KEY` unset and let the runtime
+fall back to an existing Claude Code login. That is a personal-use convenience
+for the developer, not a supported way to run this for anyone else.
 
 ## Status
 
 | Piece | State |
 |---|---|
 | Protocol framing (0x4E text, 0xF5 events, heartbeat, mic control) | Unit-tested against the official EvenDemoApp protocol doc + community captures |
-| Claude agent layer (multi-turn, subscription-billed, optional WebSearch) | **Verified live** — real answer round-tripped through the local `claude` CLI |
+| Claude agent layer (multi-turn, Claude Agent SDK, optional WebSearch) | **Verified live** — real answer round-tripped through the Agent SDK |
 | BLE connect | **Works** (2026-09-03) — both arms connect in ~3 s when the glasses are worn or in the open case; asleep on the desk they ignore connection requests ([investigation](docs/ble-investigation.md)) |
 | HUD display | **Works on both arms** (2026-09-03) — after switching to the official left-ack-then-right handshake and plain Text Show status |
 | Gesture events | **Measured on hardware** (2026-09-03) — long-press, double and triple taps arrive as parsed events; single-tap paging on an open answer still to confirm |
@@ -50,7 +55,7 @@ run without it.
 
 ## Hardware prerequisites
 
-- macOS with Bluetooth, [uv](https://docs.astral.sh/uv/), and the `claude` CLI logged in (`claude` works in your terminal)
+- macOS with Bluetooth, [uv](https://docs.astral.sh/uv/), and `ANTHROPIC_API_KEY` exported (see [Quickstart](#quickstart))
 - G1 glasses **disconnected from the phone app** — each arm is a BLE peripheral that accepts one central, so turn off your phone's Bluetooth (or forget the glasses in the Even app) while using the bridge
 
 ## Hardware smoke test (first run)
