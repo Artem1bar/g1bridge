@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from typing import Callable, Protocol
 
@@ -19,6 +20,10 @@ from .audio import SAMPLE_RATE, decode_lc3, rms, trim_silence
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "small.en"
+# ggml's Metal backend drops the model from the GPU after this many idle seconds
+# (default 180); the next inference then took 20-30 s on hardware (2026-09-03).
+RESIDENCY_KEEP_ALIVE_S = "86400"
+KEEP_WARM_INTERVAL_S = 60.0  # and a silent half-second every minute, belt and braces
 MIN_SPEECH_SAMPLES = SAMPLE_RATE // 2  # under 0.5 s cannot hold a question
 # Measured on a real G1 recording (2026-09-03): the quiet-room floor sits around
 # 0.005-0.01 rms per 100 ms window; speech windows run 0.03-0.1.
@@ -36,6 +41,7 @@ ModelLoader = Callable[[str], SpeechModel]
 
 
 def load_whisper(model_name: str) -> SpeechModel:
+    os.environ.setdefault("GGML_METAL_RESIDENCY_KEEP_ALIVE_S", RESIDENCY_KEEP_ALIVE_S)
     from pywhispercpp.model import Model
 
     return Model(model_name, redirect_whispercpp_logs_to=False, print_progress=False)
@@ -76,6 +82,8 @@ class WhisperTranscriber:
         self.model_name = model_name
         self._loader = loader
         self._model: SpeechModel | None = None
+        self._busy = asyncio.Lock()  # one inference at a time: real or keep-warm
+        self.warm_ups = 0
 
     def warm(self) -> None:
         """Load the model and run one silent second so the first real request is fast."""
@@ -93,4 +101,16 @@ class WhisperTranscriber:
 
     async def __call__(self, payloads: bytes) -> str:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.transcribe_lc3, payloads)
+        async with self._busy:
+            return await loop.run_in_executor(None, self.transcribe_lc3, payloads)
+
+    async def keep_warm(self, interval_s: float = KEEP_WARM_INTERVAL_S) -> None:
+        """Run a silent half-second every `interval_s` so the GPU never goes cold."""
+        silence = np.zeros(SAMPLE_RATE // 2, dtype=np.float32)
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(interval_s)
+            async with self._busy:
+                model = self._get_model()
+                await loop.run_in_executor(None, model.transcribe, silence)
+                self.warm_ups += 1

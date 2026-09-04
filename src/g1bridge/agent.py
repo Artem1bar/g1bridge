@@ -6,11 +6,14 @@ Claude subscription (same mechanism as Claude Code). No API key needed.
 
 from __future__ import annotations
 
+from typing import AsyncIterator
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    StreamEvent,
     TextBlock,
 )
 
@@ -56,6 +59,7 @@ class GlassesAgent:
                 # Deny anything not allow-listed instead of blocking on a prompt.
                 permission_mode="dontAsk",
                 model=model,
+                include_partial_messages=True,  # stream text deltas to the HUD
             )
         )
 
@@ -80,21 +84,49 @@ class GlassesAgent:
 
     async def ask(self, prompt: str) -> str:
         """Send one user turn; returns the assistant's final text."""
+        final = ""
+        async for final in self.ask_stream(prompt):
+            pass
+        return final
+
+    async def ask_stream(self, prompt: str) -> AsyncIterator[str]:
+        """Yield the growing answer as it streams; the last item is the final text."""
         await self._client.query(prompt)
+        streamed: list[str] = []
         chunks: list[str] = []
         result: ResultMessage | None = None
         async for message in self._client.receive_response():
-            if isinstance(message, AssistantMessage):
-                chunks.extend(
+            if isinstance(message, StreamEvent):
+                if message.event.get("type") == "message_start":
+                    streamed = []  # a new turn (after a tool call): start over
+                delta = text_delta(message.event)
+                if delta:
+                    streamed.append(delta)
+                    yield "".join(streamed)
+            elif isinstance(message, AssistantMessage):
+                # Keep only the latest turn: text before a web search is narration.
+                latest = [
                     block.text
                     for block in message.content
                     if isinstance(block, TextBlock)
-                )
+                ]
+                if latest:
+                    chunks = latest
             elif isinstance(message, ResultMessage):
                 result = message
-        text = "\n".join(chunks).strip()
+        text = "\n".join(chunks).strip() or "".join(streamed).strip()
         if not text and result is not None and result.result:
             text = result.result.strip()
         if not text and result is not None and result.is_error:
             text = "Agent error. Check the terminal for details."
-        return text or "(no answer)"
+        yield text or "(no answer)"
+
+
+def text_delta(event: dict) -> str:
+    """The text carried by a raw Anthropic stream event, or '' for anything else."""
+    if event.get("type") != "content_block_delta":
+        return ""
+    delta = event.get("delta") or {}
+    if delta.get("type") != "text_delta":
+        return ""
+    return str(delta.get("text") or "")

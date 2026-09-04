@@ -66,6 +66,22 @@ class HudText:
             status=status,
         )
 
+    async def preview(self, text: str) -> str:
+        """Show the first page of a still-growing answer; pagination state untouched.
+
+        Returns the page text sent, so callers can skip unchanged previews.
+        """
+        pages = paginate(
+            text, max_chars=self.max_chars, lines_per_page=self.lines_per_page
+        )
+        if not pages:
+            return ""
+        status = ScreenStatus.AI_DISPLAYING if self.ai_mode else ScreenStatus.TEXT_SHOW
+        await self.glasses.send_text_page(
+            pages[0], page=1, total_pages=1, status=status
+        )
+        return pages[0]
+
     async def page(self, step: int) -> bool:
         """Move `step` pages (negative = back). Returns False if nothing changed."""
         if len(self.pages) < 2:

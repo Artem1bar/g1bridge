@@ -33,6 +33,9 @@ RETRY_PAUSE_S = 2.0
 ACK_TIMEOUT_S = 1.0
 MIC_ATTEMPTS = 2
 MIC_RETRY_PAUSE_S = 0.5
+# An arm that drops (glasses dozing, put in the case, out of range) is retried
+# forever with a growing pause, so a hub session outlives a nap.
+RECONNECT_PAUSES_S = (2.0, 5.0, 10.0, 20.0, 30.0)
 
 # Below this the arms hear our connect request only by luck. Real numbers seen:
 # -66 dBm about a metre away in the open; -85/-90 dBm from the closed case.
@@ -92,9 +95,11 @@ class GlassArm:
         address: str,
         name: str = "",
         on_event: Callable[[G1Event], None] | None = None,
+        on_disconnect: Callable[["GlassArm"], None] | None = None,
     ):
         self.side = side
         self.address = address
+        self._on_disconnect = on_disconnect
         self.name = name or f"G1 {side}"
         self._on_event = on_event
         self._client: BleakClient | None = None
@@ -204,6 +209,8 @@ class GlassArm:
 
     def _handle_disconnect(self, _client) -> None:
         logger.warning("%s disconnected", self.name)
+        if self._on_disconnect is not None:
+            self._on_disconnect(self)
 
 
 class G1Glasses:
@@ -216,8 +223,14 @@ class G1Glasses:
         left_name: str = "",
         right_name: str = "",
     ):
-        self.left = GlassArm("left", left_address, left_name, self._dispatch)
-        self.right = GlassArm("right", right_address, right_name, self._dispatch)
+        self.left = GlassArm(
+            "left", left_address, left_name, self._dispatch, self._arm_dropped
+        )
+        self.right = GlassArm(
+            "right", right_address, right_name, self._dispatch, self._arm_dropped
+        )
+        self._closing = False
+        self._reconnects: dict[str, asyncio.Task] = {}
         self.events: asyncio.Queue[G1Event] = asyncio.Queue()
         self._listeners: list[Callable[[G1Event], None]] = []
         self._waiters: tuple[
@@ -317,14 +330,54 @@ class G1Glasses:
             logger.warning("mic reset failed (%s); carrying on", exc)
 
     async def disconnect(self) -> None:
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
+        self._closing = True
+        for task in (self._heartbeat_task, *self._reconnects.values()):
+            if task is None:
+                continue
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._heartbeat_task
-            self._heartbeat_task = None
+                await task
+        self._heartbeat_task = None
+        self._reconnects = {}
         await asyncio.gather(
             self.left.disconnect(), self.right.disconnect(), return_exceptions=True
         )
+
+    @property
+    def connected(self) -> bool:
+        return self.left.is_connected and self.right.is_connected
+
+    def _arm_dropped(self, arm: GlassArm) -> None:
+        """bleak's disconnect callback (on the loop thread): start reconnecting."""
+        if self._closing:
+            return
+        existing = self._reconnects.get(arm.side)
+        if existing is not None and not existing.done():
+            return
+        self._reconnects = {
+            **self._reconnects,
+            arm.side: asyncio.get_running_loop().create_task(self._reconnect(arm)),
+        }
+
+    async def _reconnect(self, arm: GlassArm) -> None:
+        for attempt in range(1, 1_000_000):
+            pause = RECONNECT_PAUSES_S[min(attempt, len(RECONNECT_PAUSES_S)) - 1]
+            await asyncio.sleep(pause)
+            if self._closing or arm.is_connected:
+                return
+            logger.info("%s: reconnect attempt %d", arm.name, attempt)
+            try:
+                await arm.connect(attempts=1)
+            except (RuntimeError, BleakError, OSError, TimeoutError) as exc:
+                logger.info("%s: still away (%s)", arm.name, exc)
+                continue
+            logger.info("%s: reconnected", arm.name)
+            if arm is self.right:
+                # Same defensive reset as a first connect: a mic left streaming
+                # across the drop would otherwise never stop.
+                with contextlib.suppress(Exception):
+                    await self.set_mic(False)
+            return
 
     def add_listener(self, listener: Callable[[G1Event], None]) -> None:
         self._listeners.append(listener)
@@ -364,7 +417,7 @@ class G1Glasses:
                     "right arm did not answer mic %s", "on" if enable else "off"
                 )
                 event = None
-            except (BleakError, OSError) as exc:
+            except (RuntimeError, BleakError, OSError) as exc:  # "not connected" too
                 logger.warning(
                     "mic %s write failed: %s", "on" if enable else "off", exc
                 )
@@ -383,8 +436,10 @@ class G1Glasses:
         Returns whether the left arm acknowledged in time.
         """
         ack = self.expect(EventKind.TEXT_ACK, "left")
-        await self.left.write(frame)
+        acked = False
+        left_error: Exception | None = None
         try:
+            await self.left.write(frame)
             await asyncio.wait_for(ack, timeout)
             acked = True
         except (TimeoutError, asyncio.TimeoutError):
@@ -392,15 +447,35 @@ class G1Glasses:
                 "left arm did not acknowledge within %.1fs; sending to the right anyway",
                 timeout,
             )
-            acked = False
-        await self.right.write(frame)
+        except (RuntimeError, BleakError, OSError) as exc:  # arm down or write failed
+            left_error = exc
+            logger.debug("left write skipped: %s", exc)
+        try:
+            await self.right.write(frame)
+        except (RuntimeError, BleakError, OSError) as exc:
+            if left_error is not None:
+                raise RuntimeError(f"both arms refused the page: {left_error}; {exc}")
+            logger.debug("right write skipped: %s", exc)
         return acked
 
     async def send_both(self, frame: bytes, gap_s: float = INTER_ARM_GAP_S) -> None:
-        """Send to the left arm first, then the right after a short gap."""
-        await self.left.write(frame)
-        await asyncio.sleep(gap_s)
-        await self.right.write(frame)
+        """Send to the left arm first, then the right after a short gap.
+
+        Each arm is tried on its own: a dropped left arm must not starve the
+        right one of heartbeats or pages. Raises only if neither arm took it.
+        """
+        failures = []
+        for arm, pause in ((self.left, gap_s), (self.right, 0.0)):
+            try:
+                await arm.write(frame)
+            except (RuntimeError, BleakError, OSError) as exc:
+                failures.append(f"{arm.name}: {exc}")
+            if pause:
+                await asyncio.sleep(pause)
+        if len(failures) == 2:
+            raise RuntimeError("both arms refused the write: " + "; ".join(failures))
+        for failure in failures:
+            logger.debug("send_both skipped %s", failure)
 
     async def send_text_page(
         self,

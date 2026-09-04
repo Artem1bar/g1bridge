@@ -433,3 +433,48 @@ def test_nothing_recognised_is_reported():
     assert any("nothing recognised" in line for line in said)
     assert "Didn't catch that" in sim.pages_shown[-1]
     assert StubAgent.instances == []
+
+
+class StreamingStub(StubAgent):
+    chunks = ["Paris", "Paris is the capital", "Paris is the capital of France."]
+
+    async def ask_stream(self, prompt: str):
+        self.asked.append(prompt)
+        for chunk in self.chunks:
+            yield chunk
+
+
+def test_answers_are_previewed_while_streaming():
+    StubAgent.instances = []
+    sim = SimGlasses(out=lambda _: None)
+    ticks = iter(range(0, 100, 1))  # every preview is 1 s after the last
+    session = HubSession(
+        sim,
+        AGENTS,
+        agent_factory=StreamingStub,
+        say=lambda _: None,
+        sim_gestures=True,
+        clock=lambda: float(next(ticks)),
+    )
+    asyncio.run(session.run(lines_from(["ask", "hi"])))
+    pages = sim.pages_shown
+    final = pages.index("Paris is the capital of France.")
+    assert "Paris is the capital" in pages[:final]  # a preview went out first
+    assert pages[final - 1] != "Thinking..."  # the preview replaced the placeholder
+
+
+def test_previews_are_throttled():
+    StubAgent.instances = []
+    sim = SimGlasses(out=lambda _: None)
+    session = HubSession(
+        sim,
+        AGENTS,
+        agent_factory=StreamingStub,
+        say=lambda _: None,
+        sim_gestures=True,
+        clock=lambda: 0.0,  # no time passes: never a second preview
+    )
+    asyncio.run(session.run(lines_from(["ask", "hi"])))
+    previews = [p for p in sim.pages_shown if p.startswith("Paris")]
+    assert previews[-1] == "Paris is the capital of France."
+    assert len(previews) <= 2  # at most one preview plus the final page

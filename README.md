@@ -22,6 +22,7 @@ Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (
 | Tap paging / gesture events | Next up — `g1 events` not yet run |
 | Agent hub (menu of Claude agents on the HUD, TouchBar navigation) | **Built** — state machine + terminal simulator, 55 unit tests; runs end-to-end with `g1 hub --sim`; not yet seen on hardware |
 | Voice input (glasses mic → LC3 decode → whisper.cpp → Claude → HUD) | **Works end to end on the glasses** (2026-09-03 22:47): hold the left temple, "What is the capital of France?" → "Paris." on the HUD; 5.4 s capture, 0.8 s transcription, offline, no key |
+| Streaming answers, auto-reconnect | Built (simulator-verified): the first page shows while Claude is still writing; a dropped arm is retried with a growing pause so the hub outlives a nap in the case |
 
 ## Prerequisites
 
@@ -65,6 +66,11 @@ and a double tap dismisses it. Say an agent's name first to switch ("research
 what is LC3", "translate good morning", "draft a text to Sam"), and "back" or
 "home" as words. Each agent has its own role prompt, tool access and multi-turn
 memory. Speech recognition runs on the Mac, offline, with no API key.
+
+Startup takes 10 to 25 seconds most of the time: whisper.cpp compiles its
+Metal shaders on launch and macOS only caches the result for a few minutes.
+Leave the hub running instead of restarting it; a dropped arm reconnects on
+its own, so the glasses can nap in the case and pick up where they left off.
 
 `--home` shows our own clock page and agent list instead (below); it is kept
 for experiments, because on hardware the firmware keeps every TouchBar gesture

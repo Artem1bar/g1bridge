@@ -131,3 +131,51 @@ def test_connect_survives_a_failing_mic_reset(monkeypatch):
         await glasses.disconnect()
 
     asyncio.run(go())
+
+
+def make_one_armed(record: list[str], down: str):
+    glasses = G1Glasses("L", "R", "left", "right")
+
+    async def left_write(frame: bytes) -> None:
+        if down == "left":
+            raise RuntimeError("left: not connected")
+        record.append("left")
+
+    async def right_write(frame: bytes) -> None:
+        if down == "right":
+            raise RuntimeError("right: not connected")
+        record.append("right")
+
+    glasses.left.write = left_write  # type: ignore[method-assign]
+    glasses.right.write = right_write  # type: ignore[method-assign]
+    return glasses
+
+
+def test_a_down_left_arm_does_not_starve_the_right_one():
+    record: list[str] = []
+    glasses = make_one_armed(record, down="left")
+    asyncio.run(glasses.send_both(b"beat", gap_s=0))
+    acked = asyncio.run(glasses.send_acked(b"page", timeout=0.05))
+    assert record == ["right", "right"] and acked is False
+
+
+def test_both_arms_down_is_an_error():
+    import pytest
+
+    glasses = G1Glasses("L", "R", "left", "right")
+
+    async def boom(frame: bytes) -> None:
+        raise RuntimeError("not connected")
+
+    glasses.left.write = boom  # type: ignore[method-assign]
+    glasses.right.write = boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="both arms"):
+        asyncio.run(glasses.send_both(b"beat", gap_s=0))
+    with pytest.raises(RuntimeError, match="both arms"):
+        asyncio.run(glasses.send_acked(b"page", timeout=0.05))
+
+
+def test_set_mic_survives_a_down_right_arm():
+    record: list[str] = []
+    glasses = make_one_armed(record, down="right")
+    assert asyncio.run(glasses.set_mic(False, timeout=0.05)) is False

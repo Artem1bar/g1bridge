@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 import threading
@@ -403,6 +404,7 @@ async def _hub(display: Display, agents, args: argparse.Namespace) -> None:
         return GlassesAgent.for_spec(spec, model=args.model, web_search=not args.no_web)
 
     transcriber = None
+    keep_warm: asyncio.Task | None = None
     if args.stt == "whisper" and not args.sim:
         transcriber = WhisperTranscriber(args.stt_model)
         print(
@@ -411,6 +413,7 @@ async def _hub(display: Display, agents, args: argparse.Namespace) -> None:
         )
         await asyncio.get_running_loop().run_in_executor(None, transcriber.warm)
         print("Speech model ready. Hold the left temple to talk.")
+        keep_warm = asyncio.create_task(transcriber.keep_warm())
 
     session = HubSession(
         display,
@@ -426,7 +429,13 @@ async def _hub(display: Display, agents, args: argparse.Namespace) -> None:
         mic_cmd=args.mic_cmd,
         record_dir=args.record_dir,
     )
-    await session.run(stdin_lines())
+    try:
+        await session.run(stdin_lines())
+    finally:
+        if keep_warm is not None:
+            keep_warm.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await keep_warm
 
 
 def _transcribe_file(args: argparse.Namespace) -> None:

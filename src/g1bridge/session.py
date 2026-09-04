@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterable, Callable, Protocol
@@ -49,6 +50,8 @@ MAX_CAPTURE_S = 20.0  # finish on our own if the firmware never reports the rele
 TAIL_QUIET_S = 1.0
 TAIL_MAX_S = 6.0
 REST_HINT = "At rest on the glasses' dashboard: hold the left temple and ask."
+PREVIEW_INTERVAL_S = 0.8  # a BLE page send takes ~0.3 s with the ack; don't flood
+PREVIEW_MIN_CHARS = 12  # wait for a few words before the first preview
 AGENT_ERROR_TEXT = "Agent error. Check the terminal for details."
 QUIT_WORDS = frozenset({"/quit", "/exit"})
 QUIET_EVENTS = frozenset(
@@ -60,7 +63,11 @@ HOME_WORDS = frozenset({"home", "/home"})
 
 
 class Asker(Protocol):
-    """A live agent session; `agent.GlassesAgent` satisfies this."""
+    """A live agent session; `agent.GlassesAgent` satisfies this.
+
+    An agent may also offer `ask_stream(prompt) -> AsyncIterator[str]` yielding
+    the growing answer; the hub previews it on the display as it arrives.
+    """
 
     async def __aenter__(self) -> "Asker": ...
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool | None: ...
@@ -120,6 +127,7 @@ class HubSession:
         tail_quiet_s: float = TAIL_QUIET_S,
         tail_max_s: float = TAIL_MAX_S,
         record_dir: Path | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._display = display
         mode = Mode.REST if rest else Mode.HOME
@@ -131,6 +139,7 @@ class HubSession:
         self._tail_quiet_s = tail_quiet_s
         self._tail_max_s = tail_max_s
         self._record_dir = record_dir
+        self._monotonic = clock
         self._closing = False  # release seen; finishing once the wearer is quiet
         self._quiet_packets = 0
         self._finish_token = 0  # stale backstop timers must not end a new capture
@@ -427,7 +436,7 @@ class HubSession:
         await self._hud.show(THINKING_TEXT)
         try:
             agent = await self._pool.get(spec)
-            answer = await agent.ask(text)
+            answer = await self._answer(agent, text)
         except Exception:  # keep the hub alive; the terminal gets the traceback
             logger.exception("agent %s failed", spec.id)
             answer = AGENT_ERROR_TEXT
@@ -435,6 +444,21 @@ class HubSession:
         pages = await self._hud.show(answer)
         if pages > 1:
             self._say(f"({pages} pages on the HUD: tap right for next, left for back)")
+
+    async def _answer(self, agent: Asker, text: str) -> str:
+        """Ask, previewing the first page on the display while the answer grows."""
+        stream = getattr(agent, "ask_stream", None)
+        if stream is None:
+            return await agent.ask(text)
+        answer = ""
+        last_sent = float("-inf")
+        async for answer in stream(text):
+            now = self._monotonic()
+            if len(answer) < PREVIEW_MIN_CHARS or now - last_sent < PREVIEW_INTERVAL_S:
+                continue
+            await self._hud.preview(answer)
+            last_sent = now
+        return answer
 
     async def _exit(self) -> bool:
         await self._display.exit_to_dashboard()

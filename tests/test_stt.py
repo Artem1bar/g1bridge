@@ -83,3 +83,41 @@ def test_non_speech_labels_are_dropped():
     assert clean_transcript("[SOUND]") == ""
     assert clean_transcript(" (dog panting) [BLANK_AUDIO] ") == ""
     assert clean_transcript("Hello [clicking] there  world.") == "Hello there world."
+
+
+def test_keep_warm_runs_silent_inferences_and_yields_to_real_ones():
+    model = StubModel()
+    transcriber = WhisperTranscriber("tiny.en", loader=lambda name: model)
+
+    async def go():
+        task = asyncio.create_task(transcriber.keep_warm(interval_s=0.01))
+        await asyncio.sleep(0.08)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(go())
+    assert transcriber.warm_ups >= 3 and model.calls == transcriber.warm_ups
+
+
+def test_metal_keep_alive_is_set_before_the_model_loads(monkeypatch):
+    import os
+    import sys
+    import types
+
+    from g1bridge import stt
+
+    monkeypatch.delenv("GGML_METAL_RESIDENCY_KEEP_ALIVE_S", raising=False)
+    seen: dict[str, str | None] = {}
+
+    class FakeModel:
+        def __init__(self, name, **kwargs):
+            seen["value"] = os.environ.get("GGML_METAL_RESIDENCY_KEEP_ALIVE_S")
+
+    fake = types.ModuleType("pywhispercpp.model")
+    fake.Model = FakeModel
+    monkeypatch.setitem(sys.modules, "pywhispercpp.model", fake)
+    stt.load_whisper("tiny.en")
+    assert seen["value"] == stt.RESIDENCY_KEEP_ALIVE_S
