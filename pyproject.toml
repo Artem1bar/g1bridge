@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Even Realities G1 smart glasses to Claude agent bridge (BLE, Mac-side)"
 readme = "README.md"
 authors = [
-    { name = "Tim", email = "barabarin.bar@gmail.com" }
+    { name = "Artem Baranovski", email = "abaran2@lsu.edu" }
 ]
 requires-python = ">=3.12"
 dependencies = [

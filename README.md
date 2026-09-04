@@ -172,3 +172,7 @@ fail with a message naming the field before anything connects.
 2. **Voice on the glasses end-to-end**: the pipeline (LC3 → whisper.cpp small.en, `lc3py` + `pywhispercpp`) is built and validated offline with `g1 transcribe`; confirm the hold-to-talk round trip on the HUD and tune the silence gate on more recordings.
 3. **Tools that make agents useful**: calendar, reminders, home control, notes with memory — added per agent in `~/.g1bridge-agents.toml`.
 4. **Daily-driver platform decision**: keep the Mac bridge for hacking, then either a MentraOS app or a custom companion app so it works away from the desk. The hub and agent layers are transport-agnostic (`Display` protocol), so a phone-side transport slots in without rewriting them.
+
+## Built with
+
+g1bridge was developed with Claude Code as the coding agent. MIT licensed (see [LICENSE](LICENSE)).

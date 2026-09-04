@@ -8,3 +8,21 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Tooling caches / other venv names
+.pytest_cache/
+.ruff_cache/
+node_modules/
+venv/
+
+# OS
+.DS_Store
+
+# Local databases
+*.db
+*.sqlite
