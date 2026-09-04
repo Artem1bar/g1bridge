@@ -2,6 +2,8 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
+![Simulated HUD: home dashboard, agent menu, and the Ask agent, rendered by g1 hub --sim](docs/hud-sim.png)
+
 Talk to a Claude agent through your **Even Realities G1** smart glasses — no phone app in the loop.
 
 Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (running through the local `claude` CLI, billed to your existing Claude subscription — no API key) answers onto the heads-up display. TouchBar taps page through long answers.
