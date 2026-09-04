@@ -1,5 +1,7 @@
 # g1bridge
 
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+
 Talk to a Claude agent through your **Even Realities G1** smart glasses — no phone app in the loop.
 
 Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (running through the local `claude` CLI, billed to your existing Claude subscription — no API key) answers onto the heads-up display. TouchBar taps page through long answers.
@@ -11,6 +13,26 @@ Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (
 └────────────┘                    └────────────┘                      └──────────────┘
 ```
 
+**Status:** working prototype, Mac-side. BLE, HUD text and hold-to-talk voice
+were verified on real G1 glasses on 2026-09-03. The whole hub also runs on a
+terminal simulator, so nothing below needs hardware except the smoke test.
+
+## Quickstart
+
+macOS with [uv](https://docs.astral.sh/uv/) (it fetches Python 3.12 if needed).
+
+```bash
+git clone https://github.com/Artem1bar/g1bridge.git && cd g1bridge
+uv sync
+uv run pytest            # 145 unit tests, no hardware
+uv run g1 hub --sim      # the whole hub on a simulated HUD in your terminal
+uv run g1 --help
+```
+
+Answers come from the local `claude` CLI (logged in; no API key), so `g1 chat`
+and the hub need it installed. Framing, pagination, the simulator and the tests
+run without it.
+
 ## Status
 
 | Piece | State |
@@ -19,19 +41,15 @@ Your Mac connects to both arms of the G1 over Bluetooth LE, and a Claude agent (
 | Claude agent layer (multi-turn, subscription-billed, optional WebSearch) | **Verified live** — real answer round-tripped through the local `claude` CLI |
 | BLE connect | **Works** (2026-09-03) — both arms connect in ~3 s when the glasses are worn or in the open case; asleep on the desk they ignore connection requests ([investigation](docs/ble-investigation.md)) |
 | HUD display | **Works on both arms** (2026-09-03) — after switching to the official left-ack-then-right handshake and plain Text Show status |
-| Tap paging / gesture events | Next up — `g1 events` not yet run |
+| Gesture events | **Measured on hardware** (2026-09-03) — long-press, double and triple taps arrive as parsed events; single-tap paging on an open answer still to confirm |
 | Agent hub (menu of Claude agents on the HUD, TouchBar navigation) | **Built** — state machine + terminal simulator, 55 unit tests; runs end-to-end with `g1 hub --sim`; not yet seen on hardware |
 | Voice input (glasses mic → LC3 decode → whisper.cpp → Claude → HUD) | **Works end to end on the glasses** (2026-09-03 22:47): hold the left temple, "What is the capital of France?" → "Paris." on the HUD; 5.4 s capture, 0.8 s transcription, offline, no key |
 | Streaming answers, auto-reconnect | Built (simulator-verified): the first page shows while Claude is still writing; a dropped arm is retried with a growing pause so the hub outlives a nap in the case |
 
-## Prerequisites
+## Hardware prerequisites
 
 - macOS with Bluetooth, [uv](https://docs.astral.sh/uv/), and the `claude` CLI logged in (`claude` works in your terminal)
 - G1 glasses **disconnected from the phone app** — each arm is a BLE peripheral that accepts one central, so turn off your phone's Bluetooth (or forget the glasses in the Even app) while using the bridge
-
-```bash
-uv sync
-```
 
 ## Hardware smoke test (first run)
 
@@ -87,12 +105,13 @@ a green monochrome lens: uppercase labels, bar gauges, one readout per row.
 +----------------------------------------+
 ```
 
-Rows come from: the glasses' own battery reports; your `central.hub` service
-on `127.0.0.1:3100` (next class, coursework due and overdue, next deadline,
-never-called leads, failed runs in 24 h; read-only endpoints only); macOS
-Calendar (asks once); and Open-Meteo weather if `~/.g1bridge.json` has
-`"home": {"lat": ..., "lon": ...}`. Feeds refresh every five minutes and any
-that is down keeps its last value. `--home` shows the same page as a
+Rows come from: the glasses' own battery reports; macOS Calendar (asks once);
+Open-Meteo weather if `~/.g1bridge.json` has `"home": {"lat": ..., "lon": ...}`;
+and, optionally, a personal dashboard service at `hub_url` (default
+`http://127.0.0.1:3100`, read-only GETs; [providers.py](src/g1bridge/providers.py)
+shows the JSON it expects). Without one, those rows stay empty and a warning is
+logged. Feeds refresh every five minutes and any that is down keeps its last
+value. `--home` shows the same page as a
 permanent screen for experiments (gestures are dead while it is up).
 
 ```
@@ -118,8 +137,8 @@ and it tells us so. A triple tap toggles the firmware's silent mode. While our
 own page is on screen the firmware forwards no taps and no long-press, which
 is why the hub rests on the firmware's dashboard.
 
-Until voice lands, questions are typed in the terminal; the answer pages onto
-the HUD. Typing an agent's number or name in the menu opens it too.
+Questions can also be typed in the terminal (the answer still pages onto the
+HUD), and typing an agent's number or name in the menu opens it.
 
 **No glasses handy?** `uv run g1 hub --sim` renders every HUD page in the
 terminal and accepts gesture words instead of taps: `r` / `l` single tap,
@@ -168,8 +187,8 @@ fail with a message naming the field before anything connects.
 
 ## Roadmap
 
-1. **Hub on real glasses**: connection works as of 2026-09-03; next confirm text renders (`g1 hello`), taps arrive (`g1 events`), then the gesture map and line widths under `g1 hub`.
-2. **Voice on the glasses end-to-end**: the pipeline (LC3 → whisper.cpp small.en, `lc3py` + `pywhispercpp`) is built and validated offline with `g1 transcribe`; confirm the hold-to-talk round trip on the HUD and tune the silence gate on more recordings.
+1. **Hub on real glasses, end to end**: connection, HUD text and voice all work as of 2026-09-03; still to confirm single-tap paging, the full gesture map and line widths under `g1 hub`.
+2. **Voice tuning**: the pipeline (LC3 → whisper.cpp small.en, `lc3py` + `pywhispercpp`) round-trips on the HUD; tune the silence gate on more recordings (`g1 events --record`, then `g1 transcribe`).
 3. **Tools that make agents useful**: calendar, reminders, home control, notes with memory — added per agent in `~/.g1bridge-agents.toml`.
 4. **Daily-driver platform decision**: keep the Mac bridge for hacking, then either a MentraOS app or a custom companion app so it works away from the desk. The hub and agent layers are transport-agnostic (`Display` protocol), so a phone-side transport slots in without rewriting them.
 
