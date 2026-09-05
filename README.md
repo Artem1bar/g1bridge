@@ -2,7 +2,7 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
-![Simulated HUD: home dashboard, agent menu and the Ask agent from g1 hub --sim, and the cockpit reticle bitmap from g1 cockpit --sim](docs/hud-sim.png)
+![What the lenses show: the home dashboard and agent menu rendered by g1 hub --sim, and the 576x136 cockpit reticle bitmap from g1 cockpit --sim](docs/hud-sim.png)
 
 Talk to a Claude agent through your **Even Realities G1** smart glasses — no phone app in the loop.
 
@@ -53,8 +53,9 @@ for the developer, not a supported way to run this for anyone else.
 | Agent hub (menu of Claude agents on the HUD, TouchBar navigation) | **Built** — state machine + terminal simulator, 55 unit tests; runs end-to-end with `g1 hub --sim`; not yet seen on hardware |
 | Voice input (glasses mic → LC3 decode → whisper.cpp → Claude → HUD) | **Works end to end on the glasses** (2026-09-03 22:47): hold the left temple, "What is the capital of France?" → "Paris." on the HUD; 5.4 s capture, 0.8 s transcription, offline, no key |
 | Streaming answers, auto-reconnect | Built (simulator-verified): the first page shows while Claude is still writing; a dropped arm is retried with a growing pause so the hub outlives a nap in the case |
-| Bitmaps on the lens (1-bit 576×136 upload: `0x15` packets, finish handshake, `0x16` CRC) | **Built** from the official demo app's sequence, unit-tested; not yet seen on hardware |
-| Cockpit reticle (`g1 cockpit`): corner marks, centre cross, clock, charge | **Built** + simulator; first hardware run pending |
+| Bitmaps on the lens (1-bit 576×136 upload: `0x15` packets, finish handshake, `0x16` CRC) | **Works on hardware** (2026-09-04): first picture shown on both lenses. The lens clips the bitmap's top rows; `g1 cockpit --ruler` measures it and `lens_margins` in the config keeps the drawing inside |
+| Cockpit reticle (`g1 cockpit`, `g1 hub --cockpit`): corner marks, centre cross, clock, charge; tap right for the agent reel | **Seen on the lens** once; the cockpit ↔ reel gesture flow runs on the simulator, its hardware run is next |
+| Even's own settings over BLE (`g1 settings`, `g1 hub --takeover`): head-up and double-tap actions, display position, silent mode, firmware build | **Built** from community-sniffed frames, unit-tested byte for byte; not yet tried on hardware |
 
 ## Hardware prerequisites
 
@@ -126,30 +127,74 @@ permanent screen for experiments (gestures are dead while it is up).
 
 ```
 +----------------------------------------+      +----------------------------------------+
-|19:27  Thu 3 Sep                        |      |CLAUDE HUB                           2/5|
-|Claude Hub                              |  tap |  Ask       quick answers, web on       |
-|hold left temple: talk to Ask           | ---> |> Research  digs in, cites sources      |
-|tap: 5 agents                           |      |  Translate any language <-> English    |
-|                                        |      |  Explain   a term or idea, simply      |
+|CLAUDE-TEC             FRI 04 SEP  20:41|      |CLAUDE-TEC  AGENTS                   2/5|
+|BATT L[###...]58%  R[###...]46%         |  tap |  ask        quick answers, web on      |
+|NEXT  nothing scheduled                 | ---> |> RESEARCH   digs in, cites sources     |
+|AGENT ASK                               |      |  translate  any language <-> English   |
+|[HOLD L] ASK   [TAP] 5 APPS   [2x] EXIT |      |[HOLD L] TALK   [R] NEXT   [L] BACK     |
 +----------------------------------------+      +----------------------------------------+
 ```
 
-**The cockpit.** `g1 cockpit` draws an always-on reticle as a one-bit bitmap on
-both lenses: 90° marks in the four corners, a plain cross dead centre, the time
-inside the top-left corner and the lower arm's charge inside the bottom-right,
-redrawn every minute; Ctrl+C hands the lens back. `--sim` prints it as ASCII,
-`--save FILE.bmp` writes the file, `--once` leaves it on the lens, `--battery 58`
-shows that charge instead of the arms' reports. The upload
-follows the official demo app (194-byte `0x15` packets to a fixed storage
-address, the `0x20 0x0D 0x0E` finish handshake, then a CRC-32 under `0x16`) and
-has not been tried on hardware yet. Two things to measure there: whether a
-bitmap page lets the long-press through (text pages do not), and what a triple
-tap does while it is up (the firmware's silent-mode toggle).
+**The cockpit.** `g1 hub --cockpit` rests on an always-on reticle drawn as a
+one-bit bitmap on both lenses: 90° marks in the four corners, a plain cross
+dead centre, the time inside the top-left corner and the lower arm's charge
+inside the bottom-right, redrawn every minute. Look up for the agent reel (the
+chosen agent on the middle row, the list rotating under it), look up again to
+move down it, hold the left temple to talk; the reel goes back to the cockpit
+by itself after eight quiet seconds, or on a double tap. A double tap after an
+answer brings the cockpit back; a triple tap hides or shows it (that tap is
+also the firmware's silent-mode toggle, so watch what else it does). Measured
+2026-09-04: with a bitmap of ours on the lens the firmware forwards head up and
+down, the long-press and the double tap, but never a single tap, which is why
+the reel is driven by looking up. Run it with `--takeover` so the firmware's
+own dashboard stays out of the way.
+
+```
++----------------------------------------+
+|CLAUDE-TEC  AGENTS                   2/5|
+|  ask        quick answers, web on      |
+|> RESEARCH   digs in, cites sources     |
+|  translate  any language <-> English   |
+|[HOLD L] TALK   [UP] NEXT   [2x] BACK   |
++----------------------------------------+
+```
+
+`g1 cockpit` draws the reticle on its own (`--sim` prints it as ASCII,
+`--save FILE.bmp` writes the file, `--once` leaves it on the lens, Ctrl+C hands
+the lens back). The lens shows less than the whole bitmap: the first picture
+(2026-09-04) lost its top rows, and the ruler put the visible edge at about
+row 24. So run `g1 cockpit --ruler` once, read the smallest row number you can
+see whole (ticks every 4 px help), and store it, for example
+`g1 cockpit --top 24 --remember`; it lands as `lens_margins` in
+`~/.g1bridge.json` and every command draws inside it. `--height ROWS` is an
+experiment: a bitmap taller than the documented 136 rows, with the ruler
+numbering the extra rows, to find out whether the lens has room below. The upload follows the
+official demo app (194-byte `0x15` packets to a fixed storage address, the
+`0x20 0x0D 0x0E` finish handshake, then a CRC-32 under `0x16`); the heartbeat
+keeps running during an upload, as the demo app's does. Still to measure:
+whether a bitmap page lets the taps and the long-press through (text pages do
+not), and what a triple tap does while it is up.
+
+**Getting Even's UI out of the way.** Replacing the firmware is off the table
+(it is signed; [docs/firmware.md](docs/firmware.md) has the evidence), but the
+firmware takes the Even app's settings over the same link. `g1 settings
+--head-up none --double-tap none` stops the dashboard from appearing when you
+look up or double-tap, `g1 settings --display HEIGHT DEPTH` moves the whole
+picture in your view (height 0-8, depth 1-9, previewed for three seconds
+then applied), `--silent on|off` is the triple-tap toggle and `--info` prints
+each arm's firmware build. `g1 hub --cockpit --takeover` sets head-up and
+double-tap to none while it runs and puts them back to the dashboard on exit.
+The frames are community-sniffed from the Even app, not from the official doc.
+Measured 2026-09-04: `--info` answers from both arms (firmware 1.6.6, a JBD
+micro-LED projector), the settings are acknowledged, and with head-up set to
+none the firmware closed its dashboard and never opened it on look-up again.
+The Even app can always restore its own settings.
 
 | Where | Long-press left | Right / left tap | Double tap |
 |---|---|---|---|
 | At rest (glasses' dashboard) | ask the current agent | firmware's own | firmware's own |
 | Answer on screen | new question, or "send" if the release wasn't reported | next / previous page (to confirm) | dismiss, back to rest |
+| Cockpit reticle (`--cockpit`) | ask the selected agent | not forwarded by the firmware; look up opens the reel and moves down it | back to the cockpit |
 
 Measured on hardware (2026-09-03): the long-press arrives as its own event and
 the right arm streams microphone audio by itself; the release is reported only
@@ -192,7 +237,7 @@ fail with a message naming the field before anything connects.
 - [hud.py](src/g1bridge/hud.py) — paged text sessions with TouchBar paging
 - [agent.py](src/g1bridge/agent.py) — Claude Agent SDK wrapper with a HUD-tuned system prompt
 - [agents.py](src/g1bridge/agents.py) — agent registry: built-in agents + TOML overrides, validated
-- [hub.py](src/g1bridge/hub.py) — pure hub state machine (menu ↔ agent) and menu rendering
+- [hub.py](src/g1bridge/hub.py) — pure hub state machine (rest / home / cockpit ↔ reel ↔ agent) and the reel rendering
 - [session.py](src/g1bridge/session.py) — `HubSession`: display events + terminal lines → state machine → agents
 - [display.py](src/g1bridge/display.py) — the `Display` protocol both transports satisfy
 - [sim.py](src/g1bridge/sim.py) — terminal simulator: ASCII HUD frames, typed gestures
@@ -208,6 +253,9 @@ fail with a message naming the field before anything connects.
 
 - [even-realities/EvenDemoApp](https://github.com/even-realities/EvenDemoApp) — official demo app; its README documents the BLE protocol (BSD-2-Clause). Primary source.
 - [emingenc/even_glasses](https://github.com/emingenc/even_glasses), [binarythinktank/eveng1_python_sdk](https://github.com/binarythinktank/eveng1_python_sdk) — community implementations used as factual references for byte constants (no code reused; even_glasses is GPLv3).
+
+- [AGiXT/mobile](https://github.com/AGiXT/mobile) — "Even Realities G1 BLE Protocol.txt": community notes with the Even app's settings frames (head-up and double-tap actions, display position), sniffed from the app; the source for `g1 settings`.
+- [docs/firmware.md](docs/firmware.md) — what runs on the G1 (nRF5340, Zephyr, signed MCUboot images) and why replacing it is not on the table.
 
 ## Roadmap
 
